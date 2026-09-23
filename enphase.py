@@ -61,7 +61,8 @@ def _load_cookie() -> str:
 class EnphaseIQGateway:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.base = (cfg.get("gateway") or "").rstrip("/")
+        self.base = ((cfg.get("enphase_gateway") or cfg.get("gateway") or "")
+                     .rstrip("/"))
         self.token = None
         self.auth_failed = False
         self.session = requests.Session()

@@ -39,16 +39,21 @@ POWER_FIELDS = ("instant_power", "watts", "W")
 
 
 class PowerwallClient:
+    _AUTH_LOCKOUT_S = 30  # don't hammer the gateway after a failed login
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.base = cfg["gateway"].rstrip("/")
         self.token = None
         self.auth_failed = False
+        self._last_auth_fail = 0.0
         self.session = requests.Session()
         self.session.verify = False  # self-signed gateway cert
 
     # ---------- auth ----------
-    def authenticate(self) -> bool:
+    def authenticate(self, force: bool = False) -> bool:
+        if not force and (time.time() - self._last_auth_fail) < self._AUTH_LOCKOUT_S:
+            return bool(self.token)
         payload = {"username": self.cfg.get("username", "customer")}
         if self.cfg.get("local_api_password"):
             payload["password"] = self.cfg["local_api_password"]
@@ -63,12 +68,14 @@ class PowerwallClient:
             if self.token:
                 log.info("authenticated, token acquired")
             else:
-                log.warning("authenticate: no token in response (HTTP %s): %s",
-                            r.status_code, data)
+                self._last_auth_fail = time.time()
+                log.warning("authenticate: no token in response (HTTP %s): %s — "
+                           "%d s lockout", r.status_code, data, self._AUTH_LOCKOUT_S)
             return bool(self.token)
         except Exception as e:
             self.auth_failed = True
-            log.warning("authenticate error: %s", e)
+            self._last_auth_fail = time.time()
+            log.warning("authenticate error: %s — %d s lockout", e, self._AUTH_LOCKOUT_S)
             return False
 
     def _headers(self):

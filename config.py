@@ -13,7 +13,8 @@ SECRET_KEYS = ("local_api_password", "enphase_token")
 
 DEFAULTS = {
     "source": "tesla",   # "tesla" | "enphase"
-    "gateway": "",    # e.g. https://192.168.x.x — set via dashboard config UI
+    "gateway": "",    # Tesla gateway, e.g. https://192.168.x.x (set via config API/UI)
+    "enphase_gateway": "",  # Enphase IQ Gateway, e.g. https://<ip> (falls back to "gateway")
     "username": "customer",
     "email": "",      # Tesla app account email (optional — set via config UI)
     "local_api_password": "",  # Fernet-encrypted on disk when set

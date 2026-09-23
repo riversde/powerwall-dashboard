@@ -191,9 +191,10 @@ def api_energy():
 def api_config_get():
     # Never expose the secrets in plaintext.
     public = {k: v for k, v in cfg.items()
-             if k not in ("local_api_password", "enphase_token")}
+             if k not in ("local_api_password", "enphase_token", "email")}
     public["has_password"] = bool(cfg.get("local_api_password"))
     public["has_enphase_token"] = bool(cfg.get("enphase_token"))
+    public["has_email"] = bool(cfg.get("email"))
     return jsonify(public)
 
 
@@ -202,7 +203,7 @@ def api_config_set():
     """Update config — single storage backend (config.save) for all writes."""
     global cfg, client, poll_mod
     data = request.get_json(silent=True) or {}
-    updatable = ("gateway", "username", "email", "source",
+    updatable = ("gateway", "enphase_gateway", "username", "email", "source",
                 "poll_interval_seconds", "grid_import_rate", "grid_export_credit")
     for k in updatable:
         if k in data and data[k] not in (None, ""):
@@ -229,10 +230,11 @@ def api_config_set():
                 log.exception("reschedule failed")
     # re-auth immediately after a credential/source change
     if (data.get("local_api_password") or data.get("enphase_token")
-            or "source" in data or "gateway" in data):
+            or "source" in data or "gateway" in data
+            or "enphase_gateway" in data):
         client.auth_failed = False
         client.token = None
-        client.authenticate()
+        client.authenticate(force=True)
     return jsonify({"ok": True, "config": {k: v for k, v in cfg.items()
                                           if k not in ("local_api_password",
                                                        "enphase_token")},
@@ -243,7 +245,7 @@ def api_config_set():
 def api_reauth():
     client.auth_failed = False
     client.token = None
-    ok = client.authenticate()
+    ok = client.authenticate(force=True)
     return jsonify({"ok": ok, "auth_failed": client.auth_failed})
 
 
