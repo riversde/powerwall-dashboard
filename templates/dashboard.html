@@ -30,6 +30,13 @@ body{margin:0;background:var(--bg);color:var(--text);
 #chart-wrap canvas{max-width:100% !important}
 h1{font-size:20px;margin:0 0 4px;font-weight:600}
 .sub{color:var(--muted);font-size:12px;margin-bottom:16px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.source-pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid var(--line);border-radius:12px;font-size:11px;letter-spacing:.4px;text-transform:uppercase;color:var(--muted)}
+.source-pill b{color:var(--text);font-weight:600}
+.source-switch{display:inline-flex;gap:4px}
+.source-switch button{background:none;border:1px solid var(--line);color:var(--muted);border-radius:10px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:inherit;letter-spacing:.3px}
+.source-switch button.on{border-color:var(--green);color:var(--text);background:rgba(61,220,132,.08)}
+.source-switch button:hover:not(.on){color:var(--text)}
+.source-switch button:disabled{opacity:.45;cursor:default}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--green);display:inline-block;margin-right:6px}
 .dot.warn{background:var(--amber)} .dot.err{background:var(--red)}
 #tooltip{position:fixed;z-index:200;background:#1c2a45;border:1px solid var(--border);color:var(--text);
@@ -239,8 +246,13 @@ body { margin: 0; background: var(--pf-ground); color: var(--pf-text); font-fami
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap">
 </head>
 <body>
-<h1>Powerwall 2 — Live</h1>
+<h1><span id="title-name">Powerwall 2</span> — Live</h1>
 <div class="sub">
+  <span class="source-pill" id="source-pill">source <b id="source-name">—</b></span>
+  <span class="source-switch" id="source-switch">
+    <button data-source="tesla" title="Tesla Powerwall 2">Tesla</button>
+    <button data-source="enphase" title="Enphase IQ Gateway">Enphase</button>
+  </span>
   <span><span class="dot" id="status-dot"></span><span id="status-text">connecting…</span></span>
   <span>updated <b id="updated">—</b></span>
   <span>·</span><span>poll <b id="poll-count">0</b></span>
@@ -928,24 +940,26 @@ async function refresh(){
 
   // SoE gauge
   const soe = s.soe_pct;
-  $('soe-val').textContent = soe!=null ? Math.round(soe)+'%' : '—';
-  $('soe-pct').textContent = soe!=null ? soe.toFixed(1)+'%' : '—';
+  const noBatt = soe==null;
+  $('soe-val').textContent = noBatt ? '—' : Math.round(soe)+'%';
+  $('soe-pct').textContent = noBatt ? '—' : soe.toFixed(1)+'%';
   const C = 226.2;
-  $('gauge-arc').style.strokeDashoffset = C - (soe!=null ? C*soe/100 : 0);
-  $('gauge-arc').style.stroke = soe<15 ? 'var(--red)' : soe<35 ? 'var(--amber)' : 'var(--green)';
-  $('soe-sub').innerHTML = `capacity ${cap.toFixed(1)} kWh${rem!=null?` · <b>${rem.toFixed(2)} kWh left</b>`:''}`+
+  $('gauge-arc').style.strokeDashoffset = C - (noBatt ? 0 : C*soe/100);
+  $('gauge-arc').style.stroke = noBatt ? 'var(--muted)' : soe<15 ? 'var(--red)' : soe<35 ? 'var(--amber)' : 'var(--green)';
+  $('soe-sub').innerHTML = noBatt ? 'no battery on this system'
+    : `capacity ${cap.toFixed(1)} kWh${rem!=null?` · <b>${rem.toFixed(2)} kWh left</b>`:''}`+
     (s.hours_remaining!=null?` · ~${s.hours_remaining.toFixed(1)} h at draw`:'');
 
   // battery
   const bw = s.battery_w;
-  $('batt-val').textContent = bw!=null ? (Math.abs(bw)/1000).toFixed(2) : '—';
+  $('batt-val').textContent = noBatt ? '—' : (bw!=null ? (Math.abs(bw)/1000).toFixed(2) : '—');
   const bBadge = $('batt-badge');
-  if(bw==null){ bBadge.textContent='—'; }
+  if(noBatt || bw==null){ bBadge.textContent='no battery'; }
   else if(bw>15){ bBadge.textContent='⚡ discharging'; bBadge.className='badge dis'; }
   else if(bw<-15){ bBadge.textContent='↑ charging'; bBadge.className='badge chg'; }
   else { bBadge.textContent='idle'; bBadge.className='badge chg'; }
   const bd = te.batt_discharge_kwh||0, bc = te.batt_charge_kwh||0;
-  $('batt-sub').innerHTML = `today: <span class="dn">${bd.toFixed(2)} kWh out</span> · <span class="up">${bc.toFixed(2)} kWh in</span>`;
+  $('batt-sub').innerHTML = noBatt ? '' : `today: <span class="dn">${bd.toFixed(2)} kWh out</span> · <span class="up">${bc.toFixed(2)} kWh in</span>`;
 
   // home
   const hw = s.house_w;
@@ -1159,7 +1173,35 @@ async function loadHistory(hours=24){
 }
 
 // ---------- config + loops ----------
-async function loadConfig(){ try{ cfgIv = (await (await fetch('/api/config')).json()).poll_interval_seconds; }catch(e){} }
+async function loadConfig(){
+  try{
+    const c = await (await fetch('/api/config')).json();
+    cfgIv = c.poll_interval_seconds;
+    syncSourceUI(c.source || 'tesla');
+  }catch(e){}
+}
+// ---- source badge + switcher ----
+const SOURCE_NAMES = { tesla: 'Tesla Powerwall 2', enphase: 'Enphase' };
+function syncSourceUI(src){
+  $('source-name').textContent = src;
+  document.querySelectorAll('#source-switch button').forEach(b => {
+    b.classList.toggle('on', b.dataset.source === src);
+  });
+  $('title-name').textContent = SOURCE_NAMES[src] || src;
+}
+document.querySelectorAll('#source-switch button').forEach(b => {
+  b.addEventListener('click', async () => {
+    const src = b.dataset.source;
+    const cur = (document.querySelector('#source-switch button.on')||{}).dataset?.source;
+    if(src === cur){ refresh(); return; }
+    document.querySelectorAll('#source-switch button').forEach(x => x.disabled = true);
+    try{
+      const r = await (await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({source: src})})).json();
+      if(r.ok){ syncSourceUI(r.source || src); refresh(); }
+    }catch(e){}
+    document.querySelectorAll('#source-switch button').forEach(x => x.disabled = false);
+  });
+});
 loadConfig(); refresh(); loadSummary(); loadHistory(24);
 fitFlow();
 window.addEventListener('resize', () => { fitFlow(); refresh(); });

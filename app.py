@@ -35,7 +35,18 @@ app.config["TEMPLATES_AUTO_RELOAD"] = True
 cfg = config.ensure_config()
 storage.init_db()
 storage.maybe_rollup()
-client = powerwall.PowerwallClient(cfg)
+
+
+def build_source(cfg):
+    """Return (module, client) for the configured source.
+    powerwall: Tesla gateway; enphase: IQ Gateway (backbone v07)."""
+    if cfg.get("source", "tesla") == "enphase":
+        import enphase
+        return enphase, enphase.EnphaseIQGateway(cfg)
+    return powerwall, powerwall.PowerwallClient(cfg)
+
+
+poll_mod, client = build_source(cfg)
 scheduler = None
 storage.latest_snapshot = storage.get_latest()
 
@@ -47,7 +58,7 @@ FLASK_PORT = 8771
 def _poll_cycle():
     global scheduler
     try:
-        res = powerwall.poll_once(cfg, client)
+        res = poll_mod.poll_once(cfg, client)
         storage.poll_state["last_poll"] = time.strftime("%Y-%m-%d %H:%M:%S")
         storage.poll_state["poll_count"] += 1
         if res.get("ok"):
@@ -178,25 +189,35 @@ def api_energy():
 
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    # Never expose the secret in plaintext.
-    public = {k: v for k, v in cfg.items() if k != "local_api_password"}
+    # Never expose the secrets in plaintext.
+    public = {k: v for k, v in cfg.items()
+             if k not in ("local_api_password", "enphase_token")}
     public["has_password"] = bool(cfg.get("local_api_password"))
+    public["has_enphase_token"] = bool(cfg.get("enphase_token"))
     return jsonify(public)
 
 
 @app.route("/api/config", methods=["POST"])
 def api_config_set():
     """Update config — single storage backend (config.save) for all writes."""
-    global cfg
+    global cfg, client, poll_mod
     data = request.get_json(silent=True) or {}
-    updatable = ("gateway", "username", "email",
+    updatable = ("gateway", "username", "email", "source",
                 "poll_interval_seconds", "grid_import_rate", "grid_export_credit")
     for k in updatable:
         if k in data and data[k] not in (None, ""):
             cfg[k] = data[k]
     if data.get("local_api_password"):
         cfg["local_api_password"] = data["local_api_password"]
+    if data.get("enphase_token"):
+        cfg["enphase_token"] = data["enphase_token"]
     config.save(cfg)  # same backend as reads (config.load/save)
+    # source changed? rebuild the client for the new system
+    new_mod, new_client = build_source(cfg)
+    if type(new_client) is not type(client):
+        client = new_client
+        poll_mod = new_mod
+        log.info("source switched — rebuilt client: %s", type(client).__name__)
     # pick up new interval on the fly
     if "poll_interval_seconds" in data:
         interval = max(int(cfg["poll_interval_seconds"]), 10)
@@ -206,8 +227,16 @@ def api_config_set():
                                         seconds=interval)
             except Exception:
                 log.exception("reschedule failed")
+    # re-auth immediately after a credential/source change
+    if (data.get("local_api_password") or data.get("enphase_token")
+            or "source" in data or "gateway" in data):
+        client.auth_failed = False
+        client.token = None
+        client.authenticate()
     return jsonify({"ok": True, "config": {k: v for k, v in cfg.items()
-                                          if k != "local_api_password"}})
+                                          if k not in ("local_api_password",
+                                                       "enphase_token")},
+                   "source": cfg.get("source")})
 
 
 @app.route("/api/reauth", methods=["POST"])

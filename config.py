@@ -9,13 +9,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 KEY_PATH = os.path.join(BASE_DIR, "config.key")
 
-SECRET_KEYS = ("local_api_password",)
+SECRET_KEYS = ("local_api_password", "enphase_token")
 
 DEFAULTS = {
+    "source": "tesla",   # "tesla" | "enphase"
     "gateway": "",    # e.g. https://192.168.x.x — set via dashboard config UI
     "username": "customer",
     "email": "",      # Tesla app account email (optional — set via config UI)
     "local_api_password": "",  # Fernet-encrypted on disk when set
+    "enphase_token": "",       # IQ Gateway JWT (Bearer) — Fernet-encrypted when set
     "poll_interval_seconds": 10,
     "grid_import_rate": 0.0,   # ZAR per kWh imported from grid (user sets)
     "grid_export_credit": 0.0,  # ZAR per kWh exported (user said no credit)

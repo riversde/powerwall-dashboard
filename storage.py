@@ -22,6 +22,7 @@ def init_db():
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY, ts REAL,
+                source TEXT DEFAULT 'tesla',
                 soe_pct REAL, battery_w REAL, grid_w REAL, house_w REAL,
                 solar_w REAL, generator_w REAL, capacity_wh REAL,
                 energy_remaining_wh REAL, hours_remaining REAL,
@@ -34,15 +35,21 @@ def init_db():
                 house_kwh REAL, batt_charge_kwh REAL, batt_discharge_kwh REAL,
                 samples INTEGER, completed INTEGER DEFAULT 0);
         """)
+        # Migration: add source column to pre-existing tables
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(history)")]
+        if "source" not in cols:
+            conn.execute("ALTER TABLE history ADD COLUMN source TEXT DEFAULT 'tesla'")
         purge()
 
 
 def insert_row(s: dict):
+    s = dict(s)
+    s.setdefault("source", "tesla")
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO history (ts, soe_pct, battery_w, grid_w, house_w, solar_w, generator_w, "
+            "INSERT INTO history (ts, source, soe_pct, battery_w, grid_w, house_w, solar_w, generator_w, "
             "capacity_wh, energy_remaining_wh, hours_remaining, mode, backup_reserve_pct, sitemaster_up, reachable) "
-            "VALUES (:ts, :soe_pct, :battery_w, :grid_w, :house_w, :solar_w, :generator_w, "
+            "VALUES (:ts, :source, :soe_pct, :battery_w, :grid_w, :house_w, :solar_w, :generator_w, "
             ":capacity_wh, :energy_remaining_wh, :hours_remaining, :mode, :backup_reserve_pct, :sitemaster_up, :reachable)",
             s,
         )
