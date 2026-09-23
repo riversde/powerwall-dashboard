@@ -1,0 +1,1583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Powerwall 2 — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+:root{
+  --bg:#0b1220; --panel:#111a2c; --panel2:#0e1626; --border:#1e2a44;
+  --text:#dce6f5; --muted:#8fa3c0; --green:#3ddc84; --red:#ff5c5c;
+  --amber:#ffb84d; --blue:#4da6ff; --solar:#ffd24d; --orange:#ff9840;
+}
+*{box-sizing:border-box;max-width:100%}
+html{overflow-x:hidden}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:'Segoe UI',system-ui,-apple-system,sans-serif;padding:16px 20px 40px;overflow-x:hidden;
+  overflow-wrap:break-word;word-break:break-word}
+/* Generic mobile overflow-proofing: every flex/grid child can shrink below its
+   content width instead of forcing the page wider than the phone viewport. */
+.card>div,.section>div,.sum-item,.sum-grid,.grid-cards,.bars,.mode-strip,.sub,.tabs{min-width:0}
+@media(max-width:699px){.grid-cards{grid-template-columns:1fr 1fr}
+  .sum-grid{grid-template-columns:1fr 1fr}
+  .bars{grid-template-columns:1fr}}
+@media(min-width:700px){.grid-cards{grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
+  .sum-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}}
+/* Chart.js responsive canvas can force its flex parent wider than the viewport
+   on phones, clipping the right edge of every section. Constrain it. */
+#chart-wrap{position:relative;width:100%;min-width:0;max-width:100%;height:240px}
+#chart-wrap canvas{max-width:100% !important}
+h1{font-size:20px;margin:0 0 4px;font-weight:600}
+.sub{color:var(--muted);font-size:12px;margin-bottom:16px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--green);display:inline-block;margin-right:6px}
+.dot.warn{background:var(--amber)} .dot.err{background:var(--red)}
+#tooltip{position:fixed;z-index:200;background:#1c2a45;border:1px solid var(--border);color:var(--text);
+  padding:12px 14px;border-radius:10px;font-size:12.5px;max-width:300px;max-width:min(300px,calc(100vw - 24px));
+  line-height:1.45;pointer-events:auto;box-shadow:0 12px 32px rgba(0,0,0,.6);display:none;
+  max-height:50vh;overflow-y:auto}
+#tooltip b{color:#fff}
+#tooltip .tip-x{position:absolute;top:6px;right:8px;width:22px;height:22px;border-radius:6px;
+  border:none;background:transparent;color:var(--muted);font-size:16px;line-height:1;cursor:pointer;padding:0}
+#tooltip .tip-x:hover{color:var(--text);background:var(--panel2)}
+/* info icons (click/tap to show, not hover) */
+.info-ico{position:absolute;top:10px;right:10px;width:24px;height:24px;border-radius:50%;
+  background:var(--panel2);border:1px solid var(--border);color:var(--muted);
+  font-size:13px;font-weight:700;font-style:normal;font-family:Georgia,serif;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  transition:.15s;z-index:2}
+.info-ico:hover{color:var(--text);border-color:#2f4a7a;transform:scale(1.08)}
+.info-ico.on{background:#1a2b4a;color:var(--text);border-color:#2f4a7a}
+.section{position:relative}
+.sum-item{position:relative}
+/* ⓘ inside the power-flow SVG (viewBox units: 1 unit ≈ 1px on desktop) */
+.flow-info{cursor:pointer}
+.flow-info circle{fill:var(--panel2);stroke:var(--border);transition:.15s}
+.flow-info:hover circle,.flow-info.on circle{stroke:#2f4a7a}
+.flow-info text{fill:var(--muted);font-family:Georgia,serif;font-style:italic;font-weight:700}
+.flow-info:hover text,.flow-info.on text{fill:var(--text)}
+.grid-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px;margin-bottom:16px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:14px 16px;
+  display:flex;gap:14px;align-items:center;position:relative}
+.card h2{font-size:11px;letter-spacing:.12em;color:var(--muted);margin:0 0 6px;font-weight:600;text-transform:uppercase}
+.card .val{font-size:26px;font-weight:700;line-height:1.1}
+.card .unit{font-size:14px;color:var(--muted);font-weight:500}
+.card .sub2{font-size:12px;color:var(--muted);margin-top:5px}
+.card .sub2 .up{color:var(--green)} .card .sub2 .dn{color:var(--orange)} .card .sub2 .rd{color:var(--red)}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;margin-top:6px}
+.badge.in{background:rgba(255,92,92,.15);color:var(--red)} .badge.out{background:rgba(61,220,132,.15);color:var(--green)}
+.badge.chg{background:rgba(61,220,132,.15);color:var(--green)} .badge.dis{background:rgba(255,152,64,.15);color:var(--orange)}
+.gauge{width:86px;height:86px;position:relative;flex:none}
+.gauge svg{transform:rotate(-90deg)}
+.gauge .num{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center}
+.gauge .num b{font-size:20px} .gauge .num span{font-size:10px;color:var(--muted)}
+.section{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px 18px;margin-bottom:16px}
+.section h2{font-size:11px;letter-spacing:.12em;color:var(--muted);margin:0 0 12px;font-weight:600;text-transform:uppercase}
+/* net-grid banner */
+#net-banner{display:none;border-radius:12px;padding:10px 16px;margin-bottom:14px;font-size:13.5px;font-weight:600;align-items:center;gap:10px}
+#net-banner.show{display:flex}
+#net-banner.imp{background:rgba(255,92,92,.12);border:1px solid rgba(255,92,92,.35);color:var(--red)}
+#net-banner.exp{background:rgba(61,220,132,.12);border:1px solid rgba(61,220,132,.35);color:var(--green)}
+#net-banner.mid{background:rgba(143,163,192,.1);border:1px solid var(--border);color:var(--muted)}
+/* power flow */
+#flow{width:100%;height:auto;display:block}
+.node-box{fill:var(--panel2);stroke:var(--border);rx:12}
+.node-title{fill:var(--muted);font-size:11px;font-weight:700;letter-spacing:.1em}
+.node-val{fill:var(--text);font-size:20px;font-weight:700}
+.node-sub{fill:var(--muted);font-size:11px}
+.link-base{fill:none;stroke:#22314f;stroke-width:14;stroke-linecap:round;opacity:.55}
+.link-hot{fill:none;stroke-width:14;stroke-linecap:round;opacity:.28}
+.particle{filter:drop-shadow(0 0 6px currentColor)}
+/* summary tabs */
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.tab{background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:7px 14px;
+  border-radius:999px;font-size:12.5px;font-weight:600;cursor:pointer;transition:.15s}
+.tab:hover{color:var(--text)}
+.tab.active{background:#1a2b4a;color:var(--text);border-color:#2f4a7a}
+.sum-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.sum-item{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:12px 14px;position:relative}
+.sum-item h3{font-size:10.5px;letter-spacing:.1em;color:var(--muted);margin:0 0 8px;text-transform:uppercase;font-weight:600}
+.sum-item .v{font-size:22px;font-weight:700}
+.sum-item .v small{font-size:12px;color:var(--muted);font-weight:500}
+.sum-item .d{font-size:11.5px;color:var(--muted);margin-top:4px}
+.verdict{margin-top:14px;border-radius:12px;padding:11px 16px;font-size:13.5px;font-weight:600}
+.verdict.neg{background:rgba(255,92,92,.12);border:1px solid rgba(255,92,92,.3);color:var(--red)}
+.verdict.pos{background:rgba(61,220,132,.12);border:1px solid rgba(61,220,132,.3);color:var(--green)}
+.verdict.flat{background:rgba(143,163,192,.1);border:1px solid var(--border);color:var(--muted)}
+.bars{margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.bar-row{margin-bottom:10px}
+.bar-row .lbl{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:5px}
+.bar-track{height:14px;background:var(--panel2);border-radius:7px;overflow:hidden}
+.bar-fill{height:100%;border-radius:7px;transition:width .4s}
+.mode-strip{display:flex;gap:12px;flex-wrap:wrap}
+.mode-strip .ms{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:9px 38px 9px 14px;font-size:12.5px;position:relative}
+.mode-strip .ms .info-ico{top:6px;right:8px;width:22px;height:22px;font-size:12px}
+.mode-strip .ms b{color:var(--text)} .mode-strip .ms span{color:var(--muted);margin-right:8px}
+@media(max-width:700px){
+  .bars{grid-template-columns:1fr}
+  /* power flow larger on mobile (viewBox zoom handled in fitFlow());
+     bump text + touch targets */
+  .section{padding:12px 14px}
+  .node-val{font-size:28px}
+  .node-title{font-size:13px}
+  .node-sub{font-size:13px}
+  .tab{padding:10px 18px;font-size:13.5px}   /* bigger touch targets */
+  .sum-item .v{font-size:20px}
+  .card{padding:12px 14px}
+  .card .val{font-size:26px}
+  #chart-wrap{height:180px}
+  /* Power-flow switcher: 4 fixed 104px buttons (≈430px) don't fit a phone.
+     Make the switch scroll horizontally with snap, shrink the buttons, and
+     keep the active one in view so the Sankey tab is always reachable. */
+  .pf-toolbar{gap:10px}
+  .pf-switch{overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; max-width:100%}
+  .pf-switch::-webkit-scrollbar{display:none}
+  .pf-switch button{min-width:0; padding:0 14px; height:38px; font-size:13px}
+  /* Bump the widget's on-canvas text so the 0.65x-scaled layout stays legible. */
+  .pf .pill{font-size:16px}
+  .pf .header h2{font-size:22px}
+  .pf .sub{font-size:14px}
+  .pf .num{font-size:18px}
+  /* Flow footer: 4 stats span the full 1280px width — at 0.65x that's ~830px on
+     a 286px phone, so the last two need a long swipe. Reflow to 2 columns so
+     they fit the visible area. Pull up to clear the hub battery node. */
+  .pf .footer{grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; top:560px; left:28px; right:28px}
+  /* Summary: the fixed 580px left column + right column are side-by-side; on a
+     phone the right column sits off-screen. Stack them. */
+  .pf #view-summary > .abs{display:flex; flex-direction:column !important; gap:28px}
+  .pf #view-summary > .abs > div{width:100% !important; max-width:none}
+}
+/* card icons */
+.card-ico-wrap{flex:none;width:64px;height:64px;display:flex;align-items:center;justify-content:center}
+.card-ico-wrap svg{width:100%;height:100%;overflow:visible;transition:opacity .5s,filter .5s}
+.card-ico-wrap.dim svg{opacity:.35;filter:saturate(.6)}
+@keyframes ico-breathe{0%,100%{opacity:1}50%{opacity:.55}}
+.card-ico-wrap .ico-glow-active .ico-pulse{animation:ico-breathe 2.4s ease-in-out infinite}
+@media (max-width:699px){.card-ico-wrap{width:56px;height:56px}}
+@media (prefers-reduced-motion: reduce){
+  .card-ico-wrap svg *{animation:none !important}
+}
+/* ---------- power-flow-views widget (pf) ---------- */
+
+/* =====================================================================
+   DESIGN TOKENS  (keep these names; the agent maps them into the app)
+   ===================================================================== */
+:root {
+  --pf-ground:  #0c1322;
+  --pf-surface: #131c2f;
+  --pf-track:   #1a2439;
+  --pf-line:    #25314b;
+  --pf-idle:    #3a4763;
+  --pf-text:    #eef2fa;
+  --pf-muted:   #9ba8c4;
+  --pf-solar:   #f2c14e;
+  --pf-home:    #d6def0;
+  --pf-import:  #6aa6ff;
+  --pf-export:  #3fd08f;
+  --pf-export-text: #5fe0a5;
+  --pf-battery: #f0914a;
+  --pf-font: 'Barlow', system-ui, sans-serif;
+  --pf-num:  'Barlow Semi Condensed', 'Barlow', sans-serif;
+}
+body { margin: 0; background: var(--pf-ground); color: var(--pf-text); font-family: var(--pf-font); }
+
+/* ---------- widget shell ---------- */
+.pf { max-width: 1280px; margin: 0 auto; padding: 16px; }
+.pf-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.pf-toolbar h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.pf-switch { display: flex; gap: 4px; padding: 4px; border-radius: 10px; background: var(--pf-surface); border: 1px solid var(--pf-line); }
+.pf-switch button { min-width: 104px; height: 40px; border: 0; border-radius: 7px; background: transparent; color: var(--pf-muted); font: inherit; font-size: 14px; cursor: pointer; }
+.pf-switch button[aria-pressed="true"] { background: var(--pf-line); color: var(--pf-text); font-weight: 500; }
+.pf-switch button:focus-visible { outline: 2px solid var(--pf-import); outline-offset: 2px; }
+.pf-viewport { position: relative; width: 100%; overflow-x: auto; overflow-y: hidden; border-radius: 14px; border: 1px solid var(--pf-line); background: var(--pf-ground); -webkit-overflow-scrolling: touch; }
+.pf-viewport::-webkit-scrollbar { height: 8px; }
+.pf-viewport::-webkit-scrollbar-thumb { background: var(--pf-line); border-radius: 4px; }
+.pf-pan-hint { display: none; text-align: center; font-size: 11px; color: var(--pf-muted); padding: 3px 0 0; letter-spacing: .04em; }
+@media (max-width: 700px) { .pf-pan-hint { display: block; } }
+.pf-stage { position: absolute; left: 0; top: 0; width: 1280px; height: 760px; transform-origin: 0 0; }
+.pf-view { position: absolute; inset: 0; }
+.pf-view[hidden] { display: none; }
+.pf-error { display: none; margin-top: 8px; font-size: 14px; color: #ff8a8a; }
+.pf-error.show { display: block; }
+
+/* ---------- shared pieces ---------- */
+.abs  { position: absolute; }
+.num  { font-family: var(--pf-num); font-variant-numeric: tabular-nums; }
+.col  { display: flex; flex-direction: column; gap: 2px; }
+.lbl  { font-size: 15px; color: var(--pf-muted); }
+.sub  { font-size: 14px; color: var(--pf-muted); }
+.big  { font-size: 36px; font-weight: 600; line-height: 1.1; }
+.mid  { font-size: 28px; font-weight: 600; line-height: 1.1; }
+.header { left: 40px; right: 40px; top: 28px; display: flex; justify-content: space-between; align-items: center; }
+.header h2 { margin: 0; font-size: 22px; font-weight: 600; }
+.pill { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; font-size: 14px; font-weight: 500; border: 1px solid var(--pf-line); background: var(--pf-surface); }
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pf-muted); }
+.footer { left: 40px; right: 40px; top: 640px; padding-top: 24px; border-top: 1px solid var(--pf-line); }
+
+/* moving-dot overlay on energized links */
+.flow { stroke: #ffffff; stroke-opacity: .45; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 1 14; fill: none; }
+.flow.fwd { animation: pf-dash 1.1s linear infinite; }
+.flow.rev { animation: pf-dash-rev 1.1s linear infinite; }
+.flow.off { display: none; }
+@keyframes pf-dash     { to { stroke-dashoffset: -15; } }
+@keyframes pf-dash-rev { to { stroke-dashoffset:  15; } }
+@media (prefers-reduced-motion: reduce) { .flow.fwd, .flow.rev { animation: none; } }
+
+/* summary view */
+.bar { display: flex; gap: 2px; height: 14px; border-radius: 7px; overflow: hidden; background: var(--pf-track); }
+.bar > div { height: 100%; transition: width .6s ease; }
+.legend { display: flex; gap: 28px; font-size: 14px; color: var(--pf-muted); }
+.legend span.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
+.legend b { font-weight: 500; color: var(--pf-text); font-family: var(--pf-num); }
+.tile { padding: 20px; border-radius: 12px; background: var(--pf-surface); border: 1px solid var(--pf-line); display: flex; flex-direction: column; gap: 10px; }
+.tile-h { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+.tile-h span { color: var(--pf-text); }
+
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap">
+</head>
+<body>
+<h1>Powerwall 2 — Live</h1>
+<div class="sub">
+  <span><span class="dot" id="status-dot"></span><span id="status-text">connecting…</span></span>
+  <span>updated <b id="updated">—</b></span>
+  <span>·</span><span>poll <b id="poll-count">0</b></span>
+  <span>·</span><span>interval <b id="interval">—</b>s</span>
+</div>
+
+<div id="tooltip"></div>
+<div id="net-banner"></div>
+
+<div class="grid-cards" id="cards">
+  <div class="card" id="c-soe" data-tip="<b>State of Energy</b><br>How charged the battery is. 100% = fully charged. <br>Shows energy remaining and estimated hours at the current home draw."><i class="info-ico">i</i>
+    <div class="gauge">
+      <svg width="86" height="86" viewBox="0 0 86 86">
+        <circle cx="43" cy="43" r="36" fill="none" stroke="#1e2a44" stroke-width="8"/>
+        <circle id="gauge-arc" cx="43" cy="43" r="36" fill="none" stroke="#3ddc84" stroke-width="8"
+          stroke-linecap="round" stroke-dasharray="226.2" stroke-dashoffset="226.2"/>
+      </svg>
+      <div class="num"><b id="soe-val">—</b><span>SoE</span></div>
+    </div>
+    <div>
+      <h2>Battery State</h2>
+      <div class="val" id="soe-pct">—</div>
+      <div class="sub2" id="soe-sub">—</div>
+    </div>
+  </div>
+
+  <div class="card" id="c-batt" data-tip="<b>Battery Power</b><br>Instantaneous charge/discharge power. <br><b>Charging</b> = storing energy (green); <b>discharging</b> = supplying the home (orange).<br>Today = cumulative energy charged / discharged since midnight."><i class="info-ico">i</i>    <div class="card-ico-wrap ico-batt"><svg class="card-ico" viewBox="0 0 96 96" aria-hidden="true">
+  <!--
+    Set charge level with JS (0-100):
+      svg.querySelector('#pf-batt-level').setAttribute('transform', `translate(35 ${77 - 54 * pct / 100})`);
+    Default below = 72%.
+  -->
+  <defs>
+    <linearGradient id="pf-batt-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb870"/><stop offset="0.5" stop-color="#f08a3c"/><stop offset="1" stop-color="#b8531c"/>
+    </linearGradient>
+    <linearGradient id="pf-batt-shell" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2a3350"/><stop offset="0.5" stop-color="#1a2240"/><stop offset="1" stop-color="#2a3350"/>
+    </linearGradient>
+    <radialGradient id="pf-batt-halo" cx="0.5" cy="0.6" r="0.5">
+      <stop offset="0" stop-color="#f08a3c" stop-opacity="0.3"/><stop offset="1" stop-color="#f08a3c" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="pf-batt-clip"><rect x="35" y="23" width="26" height="54" rx="5"/></clipPath>
+    <filter id="pf-batt-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="1.8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <circle cx="48" cy="52" r="44" fill="url(#pf-batt-halo)"/>
+  <ellipse cx="48" cy="86" rx="20" ry="2.5" fill="#000" opacity="0.35"/>
+  <!-- terminal -->
+  <rect x="40" y="10" width="16" height="8" rx="2.5" fill="#3a4568" stroke="#f0a36a" stroke-opacity="0.6" stroke-width="1.2"/>
+  <!-- shell -->
+  <rect x="30" y="17" width="36" height="66" rx="9" fill="url(#pf-batt-shell)" stroke="#f0a36a" stroke-opacity="0.7" stroke-width="1.6"/>
+  <rect x="35" y="23" width="26" height="54" rx="5" fill="#0c1222"/>
+  <!-- charge liquid -->
+  <g clip-path="url(#pf-batt-clip)">
+    <g id="pf-batt-level" transform="translate(35 38.1)">
+      <path d="M0 0 Q6.5 -2.6 13 0 T26 0 T39 0 T52 0 V60 H0 Z" fill="url(#pf-batt-fill)">
+        <animateTransform class="ico-wave" attributeName="transform" type="translate" additive="sum" values="0 0; -26 0; 0 0" dur="3s" repeatCount="indefinite"/>
+      </path>
+    </g>
+    <!-- glass highlight -->
+    <rect x="37.5" y="25" width="4" height="50" rx="2" fill="#fff" opacity="0.12"/>
+  </g>
+  <!-- bolt -->
+  <path d="M51 38 L42 52 H48 L45 62 L54 48 H48 Z" fill="#fff6e8" stroke="#7a3510" stroke-width="1" stroke-linejoin="round" filter="url(#pf-batt-glow)"/>
+</svg>
+    </div>
+
+    <div>
+      <h2>Battery</h2>
+      <div class="val"><span id="batt-val">—</span> <span class="unit">kW</span></div>
+      <span class="badge dis" id="batt-badge">—</span>
+      <div class="sub2" id="batt-sub">—</div>
+    </div>
+  </div>
+
+  <div class="card" id="c-home" data-tip="<b>Home Load</b><br>Total power your house is consuming right now. <br>Met by solar + battery + grid. Today = cumulative consumption since midnight."><i class="info-ico">i</i>    <div class="card-ico-wrap ico-home"><svg class="card-ico" viewBox="0 0 96 96" aria-hidden="true">
+  <defs>
+    <linearGradient id="pf-home-roof" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b9ccff"/><stop offset="1" stop-color="#6a82d6"/>
+    </linearGradient>
+    <linearGradient id="pf-home-wall" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26345a"/><stop offset="1" stop-color="#151e36"/>
+    </linearGradient>
+    <radialGradient id="pf-home-halo" cx="0.5" cy="0.6" r="0.5">
+      <stop offset="0" stop-color="#ffcf73" stop-opacity="0.28"/><stop offset="1" stop-color="#ffcf73" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="pf-home-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="2.4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <circle cx="48" cy="54" r="44" fill="url(#pf-home-halo)"/>
+  <ellipse cx="48" cy="83" rx="31" ry="3" fill="#000" opacity="0.35"/>
+  <!-- chimney -->
+  <rect x="61" y="24" width="7" height="15" rx="1.5" fill="#22304f" stroke="#8aa4ff" stroke-opacity="0.55" stroke-width="1.2"/>
+  <!-- walls -->
+  <path d="M22 45 L48 25 L74 45 V81 H22 Z" fill="url(#pf-home-wall)" stroke="#8aa4ff" stroke-opacity="0.5" stroke-width="1.4" stroke-linejoin="round"/>
+  <!-- roof -->
+  <path d="M14 48 L48 20 L82 48" fill="none" stroke="url(#pf-home-roof)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- energy badge -->
+  <circle cx="48" cy="39" r="5.8" fill="#0f172a" stroke="#f5c542" stroke-width="1.3"/>
+  <path d="M49.2 35.2 L45.6 39.8 H48.1 L46.8 42.9 L50.4 38.3 H47.9 Z" fill="#f5c542"/>
+  <!-- lit windows -->
+  <g filter="url(#pf-home-glow)">
+    <rect x="28.5" y="51" width="12" height="11" rx="2" fill="#ffc861">
+      <animate attributeName="opacity" values="1;0.78;1" dur="5s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="55.5" y="51" width="12" height="11" rx="2" fill="#ffc861">
+      <animate attributeName="opacity" values="0.85;1;0.85" dur="6s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+  <g stroke="#7a5418" stroke-width="1" opacity="0.7">
+    <path d="M34.5 51 V62 M28.5 56.5 H40.5"/>
+    <path d="M61.5 51 V62 M55.5 56.5 H67.5"/>
+  </g>
+  <!-- door -->
+  <path d="M43 81 V67.5 a5 5 0 0 1 10 0 V81 Z" fill="#0d1426" stroke="#8aa4ff" stroke-opacity="0.6" stroke-width="1.2"/>
+  <circle cx="50.6" cy="74.5" r="0.9" fill="#ffc861"/>
+</svg>
+    </div>
+
+    <div>
+      <h2>Home Load</h2>
+      <div class="val"><span id="home-val">—</span> <span class="unit">kW</span></div>
+      <div class="sub2" id="home-sub">—</div>
+    </div>
+  </div>
+
+  <div class="card" id="c-grid" data-tip="<b>Grid</b><br>Power flowing between the utility and your home. <br><b>Importing</b> (red) = buying power; <b>exporting</b> (green) = surplus going out. <br>Today shows import vs export and the net balance."><i class="info-ico">i</i>    <div class="card-ico-wrap ico-grid"><svg class="card-ico" viewBox="0 0 96 96" aria-hidden="true">
+  <defs>
+    <linearGradient id="pf-grid-steel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a9c4ff"/><stop offset="1" stop-color="#4c6fbf"/>
+    </linearGradient>
+    <radialGradient id="pf-grid-halo" cx="0.5" cy="0.45" r="0.5">
+      <stop offset="0" stop-color="#4c8dff" stop-opacity="0.28"/><stop offset="1" stop-color="#4c8dff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="pf-grid-glow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="1.6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <path id="pf-grid-wire-a" d="M2 36 Q14 40 26 31 Q48 38 70 31 Q82 40 94 36"/>
+    <path id="pf-grid-wire-b" d="M2 50 Q16 54 30 45 Q48 51 66 45 Q80 54 94 50"/>
+  </defs>
+  <circle cx="48" cy="46" r="44" fill="url(#pf-grid-halo)"/>
+  <ellipse cx="48" cy="86" rx="22" ry="2.5" fill="#000" opacity="0.35"/>
+  <!-- wires -->
+  <g fill="none" stroke="#6f93e0" stroke-opacity="0.55" stroke-width="1.1">
+    <use href="#pf-grid-wire-a"/><use href="#pf-grid-wire-b"/>
+  </g>
+  <!-- tower -->
+  <g fill="none" stroke="url(#pf-grid-steel)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M44 14 L34 85 M52 14 L62 85" stroke-width="2.6"/>
+    <path d="M44 14 L48 7 L52 14 Z" stroke-width="2" fill="#1a2440"/>
+    <path d="M24 27 H72 M28 41 H68" stroke-width="2.6"/>
+    <path d="M44 14 L53.7 27 M52 14 L42.3 27 M42.3 27 L55.7 41 M53.7 27 L40.3 41 M40.3 41 L58.3 59 M55.7 41 L37.7 59 M37.7 59 L62 85 M58.3 59 L34 85 M37.7 59 H58.3" stroke-width="1.3" stroke-opacity="0.8"/>
+  </g>
+  <!-- insulators -->
+  <g fill="#cfe0ff">
+    <rect x="25" y="27" width="2" height="4" rx="1"/><rect x="69" y="27" width="2" height="4" rx="1"/>
+    <rect x="29" y="41" width="2" height="4" rx="1"/><rect x="65" y="41" width="2" height="4" rx="1"/>
+  </g>
+  <!-- flowing energy -->
+  <g filter="url(#pf-grid-glow)" fill="#7fb0ff">
+    <circle r="1.8" class="ico-pulse"><animateMotion dur="2.8s" repeatCount="indefinite"><mpath href="#pf-grid-wire-a"/></animateMotion></circle>
+    <circle r="1.8" class="ico-pulse"><animateMotion dur="2.8s" begin="-1.4s" repeatCount="indefinite"><mpath href="#pf-grid-wire-a"/></animateMotion></circle>
+    <circle r="1.8" class="ico-pulse"><animateMotion dur="3.4s" begin="-0.7s" repeatCount="indefinite"><mpath href="#pf-grid-wire-b"/></animateMotion></circle>
+  </g>
+</svg>
+    </div>
+
+    <div>
+      <h2>Grid</h2>
+      <div class="val"><span id="grid-val">—</span> <span class="unit">kW</span></div>
+      <span class="badge in" id="grid-badge">—</span>
+      <div class="sub2" id="grid-sub">—</div>
+    </div>
+  </div>
+
+  <div class="card" id="c-solar" data-tip="<b>Solar</b><br>Power produced by your PV panels right now. <br>Feeds the home first, then charges the battery, then exports. Today = cumulative generation since midnight."><i class="info-ico">i</i>    <div class="card-ico-wrap ico-solar"><svg class="card-ico" viewBox="0 0 96 96" aria-hidden="true">
+  <defs>
+    <radialGradient id="pf-sun-core" cx="0.4" cy="0.4" r="0.6">
+      <stop offset="0" stop-color="#fff3c2"/><stop offset="0.6" stop-color="#f5c542"/><stop offset="1" stop-color="#e09a1a"/>
+    </radialGradient>
+    <radialGradient id="pf-sun-halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#f5c542" stop-opacity="0.45"/><stop offset="1" stop-color="#f5c542" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="pf-panel" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#2f4a8a"/><stop offset="1" stop-color="#16244a"/>
+    </linearGradient>
+    <linearGradient id="pf-panel-sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0.35" stop-color="#fff" stop-opacity="0"/><stop offset="0.5" stop-color="#fff" stop-opacity="0.22"/><stop offset="0.65" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <!-- sun -->
+  <circle cx="64" cy="28" r="24" fill="url(#pf-sun-halo)"/>
+  <g stroke="#f5c542" stroke-width="2" stroke-linecap="round">
+    <animateTransform attributeName="transform" type="rotate" from="0 64 28" to="360 64 28" dur="30s" repeatCount="indefinite"/>
+    <path d="M64 8 V12 M64 44 V48 M44 28 H48 M80 28 H84 M49.9 13.9 L52.7 16.7 M75.3 39.3 L78.1 42.1 M49.9 42.1 L52.7 39.3 M75.3 16.7 L78.1 13.9"/>
+  </g>
+  <circle cx="64" cy="28" r="10" fill="url(#pf-sun-core)"/>
+  <ellipse cx="48" cy="89" rx="18" ry="2.2" fill="#000" opacity="0.35"/>
+  <!-- stand -->
+  <path d="M46 80 V88 M38 88.5 H54" stroke="#6a7aa6" stroke-width="2.4" stroke-linecap="round"/>
+  <!-- panel -->
+  <path d="M24 52 H68 L78 80 H14 Z" fill="url(#pf-panel)" stroke="#f5c542" stroke-opacity="0.75" stroke-width="1.6" stroke-linejoin="round"/>
+  <g stroke="#8fb0ff" stroke-opacity="0.45" stroke-width="1">
+    <path d="M35 52 L30 80 M46 52 L46 80 M57 52 L62 80"/>
+    <path d="M20.7 61.3 H71.3 M17.3 70.7 H74.7"/>
+  </g>
+  <path d="M24 52 H68 L78 80 H14 Z" fill="url(#pf-panel-sheen)">
+    <animate attributeName="opacity" values="0.4;1;0.4" dur="6s" repeatCount="indefinite"/>
+  </path>
+</svg>
+    </div>
+
+    <div>
+      <h2>Solar</h2>
+      <div class="val"><span id="solar-val">—</span> <span class="unit">kW</span></div>
+      <div class="sub2" id="solar-sub">—</div>
+    </div>
+  </div>
+</div>
+
+<div class="section" id="powerflow" data-tip="<b>Power Flow</b><br>Three views + the classic Sankey. <br><b>Flow</b> = hub, <b>Schematic</b> = electrical overview, <b>Summary</b> = energy now, <b>Sankey</b> = the classic particle flow. <br>Tap the ⓘ for node details.">
+  <h2 style="display:none">Live Power Flow</h2>
+<section class="pf" id="pf-root" aria-label="Live power flow">
+  <div class="pf-toolbar">
+    <span></span>
+    <div class="pf-switch" role="group" aria-label="Choose view">
+      <button type="button" data-view="hub"       aria-pressed="true">Flow</button>
+      <button type="button" data-view="schematic" aria-pressed="false">Schematic</button>
+      <button type="button" data-view="summary"   aria-pressed="false">Summary</button>
+      <button type="button" data-view="sankey"    aria-pressed="false">Sankey</button>
+    </div>
+  </div>
+
+  <div class="pf-viewport" id="pf-viewport">
+    <div class="pf-stage" id="pf-stage">
+
+      <!-- shared header -->
+      <div class="abs header">
+        <div class="col" style="gap:4px">
+          <h2 id="pf-title">Live power flow</h2>
+          <span class="sub">Updated <span id="pf-updated" class="num">--:--:--</span></span>
+        </div>
+        <div class="pill" id="pf-pill"><span class="dot" id="pf-pill-dot"></span><span id="pf-pill-text">Waiting for data</span></div>
+      </div>
+
+      <!-- ================= VIEW A: HUB ================= -->
+      <div class="pf-view" id="view-hub">
+        <svg class="abs" width="1280" height="760" viewBox="0 0 1280 760" style="left:0;top:0" aria-hidden="true">
+          <!-- links: base + moving-dot overlay. Path direction = "forward" -->
+          <path id="hub-solar-base" d="M640 226 V350" fill="none" stroke-linecap="round"></path>
+          <path id="hub-solar-flow" d="M640 226 V350" class="flow off"></path>
+          <path id="hub-grid-base"  d="M396 350 H640" fill="none" stroke-linecap="round"></path>
+          <path id="hub-grid-flow"  d="M396 350 H640" class="flow off"></path>
+          <path id="hub-batt-base"  d="M640 474 V350" fill="none" stroke-linecap="round"></path>
+          <path id="hub-batt-flow"  d="M640 474 V350" class="flow off"></path>
+          <path id="hub-home-base"  d="M640 350 H884" fill="none" stroke-linecap="round"></path>
+          <path id="hub-home-flow"  d="M640 350 H884" class="flow off"></path>
+          <circle cx="640" cy="350" r="8" fill="#0c1322" stroke="#eef2fa" stroke-width="2"></circle>
+          <!-- nodes -->
+          <circle id="hub-ring-solar" cx="640" cy="170" r="56" fill="#131c2f" stroke-width="2"></circle>
+          <circle id="hub-ring-home"  cx="940" cy="350" r="56" fill="#131c2f" stroke-width="2"></circle>
+          <circle id="hub-ring-grid"  cx="340" cy="350" r="56" fill="#131c2f" stroke-width="2"></circle>
+          <circle id="hub-ring-batt"  cx="640" cy="530" r="56" fill="#131c2f" stroke-width="2"></circle>
+          <!-- battery state-of-charge arc (r=62, circumference ~389.6) -->
+          <circle id="hub-soc-arc" cx="640" cy="530" r="62" fill="none" stroke="#f0914a" stroke-width="3"
+                  stroke-linecap="round" stroke-dasharray="0 389.6" transform="rotate(-90 640 530)"></circle>
+        </svg>
+
+        <div class="abs" id="hub-ico-solar" style="left:624px;top:154px" data-icon="sun"></div>
+        <div class="abs" id="hub-ico-home"  style="left:924px;top:334px" data-icon="home"></div>
+        <div class="abs" id="hub-ico-grid"  style="left:324px;top:334px" data-icon="grid"></div>
+        <div class="abs" id="hub-ico-batt"  style="left:624px;top:514px" data-icon="battery"></div>
+
+        <div class="abs col" style="left:720px;top:128px">
+          <span class="lbl">Solar</span>
+          <span class="num big" data-bind="solar.power"></span>
+          <span class="sub"><span class="num" data-bind="solar.today"></span> today</span>
+        </div>
+        <div class="abs col" style="left:1020px;top:308px">
+          <span class="lbl">Home</span>
+          <span class="num big" data-bind="home.power"></span>
+          <span class="sub"><span class="num" data-bind="home.today"></span> today</span>
+        </div>
+        <div class="abs col" style="left:60px;top:308px;width:200px;align-items:flex-end;text-align:right">
+          <span class="lbl">Grid</span>
+          <span class="num big" data-bind="grid.power"></span>
+          <span class="sub" data-bind="grid.state" data-color="grid.stateColor"></span>
+        </div>
+        <div class="abs col" style="left:720px;top:488px">
+          <span class="lbl">Battery</span>
+          <span class="num big" data-bind="battery.power" data-color="battery.valueColor"></span>
+          <span class="sub"><span data-bind="battery.state"></span>, <span class="num" data-bind="battery.soc"></span> charged</span>
+        </div>
+
+        <div class="abs footer" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:24px">
+          <div class="col" style="gap:4px"><span class="sub">Solar produced today</span><span class="num mid" data-bind="solar.today"></span></div>
+          <div class="col" style="gap:4px"><span class="sub">Home used today</span><span class="num mid" data-bind="home.today"></span></div>
+          <div class="col" style="gap:4px"><span class="sub">Net grid today</span><span class="num mid"><span data-bind="grid.netToday"></span> <span class="sub" data-bind="grid.netDir"></span></span></div>
+          <div class="col" style="gap:4px"><span class="sub">Self-powered today</span><span class="num mid" data-bind="home.selfPowered"></span></div>
+        </div>
+      </div>
+
+      <!-- ================= VIEW C: SCHEMATIC ================= -->
+      <div class="pf-view" id="view-schematic" hidden>
+        <svg class="abs" width="1280" height="760" viewBox="0 0 1280 760" style="left:0;top:0" aria-hidden="true">
+          <defs>
+            <pattern id="sch-grid-bg" width="20" height="20" patternUnits="userSpaceOnUse">
+              <path d="M20 0 H0 V20" fill="none" stroke="#141d31" stroke-width="1"></path>
+            </pattern>
+          </defs>
+          <rect x="0" y="96" width="1280" height="520" fill="url(#sch-grid-bg)"></rect>
+
+          <!-- branch paths (forward direction noted) -->
+          <path id="sch-grid-base"  d="M100 380 H200" fill="none" stroke-width="3"></path>   <!-- utility -> bus -->
+          <path id="sch-grid-flow"  d="M100 380 H200" class="flow off"></path>
+          <path id="sch-solar-base" d="M440 144 V380" fill="none" stroke-width="3"></path>   <!-- array -> bus -->
+          <path id="sch-solar-flow" d="M440 144 V380" class="flow off"></path>
+          <path id="sch-batt-base"  d="M680 380 V500" fill="none" stroke-width="3"></path>   <!-- bus -> battery -->
+          <path id="sch-batt-flow"  d="M680 380 V500" class="flow off"></path>
+          <path id="sch-home-base"  d="M960 380 V500" fill="none" stroke-width="3"></path>   <!-- bus -> panel -->
+          <path id="sch-home-flow"  d="M960 380 V500" class="flow off"></path>
+
+          <!-- main bus -->
+          <path id="sch-bus" d="M200 380 H1120" stroke="#d6def0" stroke-width="5" stroke-linecap="square"></path>
+
+          <!-- equipment -->
+          <rect id="sch-box-utility" x="40" y="350" width="60" height="60" rx="6" fill="#131c2f" stroke-width="1.5"></rect>
+          <circle id="sch-meter" cx="140" cy="380" r="22" fill="#131c2f" stroke-width="2"></circle>
+          <rect id="sch-box-array" x="380" y="100" width="120" height="44" rx="6" fill="#131c2f" stroke-width="1.5"></rect>
+          <rect id="sch-box-inv"   x="380" y="178" width="120" height="60" rx="6" fill="#131c2f" stroke-width="1.5"></rect>
+          <rect id="sch-box-batt"  x="620" y="500" width="120" height="60" rx="6" fill="#131c2f" stroke-width="1.5"></rect>
+          <rect id="sch-box-home"  x="900" y="500" width="120" height="60" rx="6" fill="#131c2f" stroke-width="1.5"></rect>
+
+          <!-- breakers (closed = filled). Wire to real breaker data if available -->
+          <rect id="sch-brk-solar" x="432" y="292" width="16" height="16"></rect>
+          <rect id="sch-brk-batt"  x="672" y="424" width="16" height="16"></rect>
+          <rect id="sch-brk-home"  x="952" y="424" width="16" height="16"></rect>
+        </svg>
+
+        <div class="abs" id="sch-ico-grid" style="left:54px;top:364px" data-icon="grid"></div>
+        <div class="abs num" style="left:118px;top:369px;width:44px;text-align:center;font-size:13px;color:var(--pf-muted)">kWh</div>
+        <div class="abs" style="left:380px;top:100px;width:120px;height:44px;display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--pf-solar)">PV array</div>
+        <div class="abs" style="left:380px;top:178px;width:120px;height:60px;display:flex;align-items:center;justify-content:center;font-size:14px">Inverter</div>
+        <div class="abs" style="left:620px;top:500px;width:120px;height:60px;display:flex;align-items:center;justify-content:center;font-size:14px">Battery</div>
+        <div class="abs" style="left:900px;top:500px;width:120px;height:60px;display:flex;align-items:center;justify-content:center;font-size:14px">Main panel</div>
+        <div class="abs sub" style="left:1060px;top:392px;font-size:13px">Main bus</div>
+
+        <div class="abs col" style="left:40px;top:430px">
+          <span class="sub">Utility grid</span>
+          <span class="num mid" data-bind="grid.power"></span>
+          <span class="sub" data-bind="grid.state" data-color="grid.stateColor"></span>
+          <span class="sub" style="font-size:13px">Net today <span class="num" data-bind="grid.netToday"></span> <span data-bind="grid.netDir"></span></span>
+        </div>
+        <div class="abs col" style="left:520px;top:172px">
+          <span class="sub">Solar output</span>
+          <span class="num mid" data-bind="solar.power"></span>
+          <span class="sub" style="font-size:13px"><span class="num" data-bind="solar.today"></span> today</span>
+        </div>
+        <div class="abs col" style="left:760px;top:500px">
+          <span class="sub" data-bind="battery.state"></span>
+          <span class="num mid" data-bind="battery.power" data-color="battery.valueColor"></span>
+          <span class="sub" style="font-size:13px"><span class="num" data-bind="battery.soc"></span> charged</span>
+        </div>
+        <div class="abs col" style="left:1040px;top:500px">
+          <span class="sub">Home load</span>
+          <span class="num mid" data-bind="home.power"></span>
+          <span class="sub" style="font-size:13px"><span class="num" data-bind="home.today"></span> today</span>
+        </div>
+
+        <div class="abs footer" style="top:660px;padding-top:20px;display:flex;gap:32px;align-items:center;font-size:14px;color:var(--pf-muted)">
+          <div style="display:flex;align-items:center;gap:10px"><svg width="36" height="8"><path d="M0 4 H36" stroke="#f2c14e" stroke-width="3"></path></svg>Carrying power</div>
+          <div style="display:flex;align-items:center;gap:10px"><svg width="36" height="8"><path d="M0 4 H36" stroke="#3a4763" stroke-width="3" stroke-dasharray="6 6"></path></svg>Idle</div>
+          <div style="display:flex;align-items:center;gap:10px"><svg width="14" height="14"><rect x="1" y="1" width="12" height="12" fill="#d6def0"></rect></svg>Breaker closed</div>
+          <div style="display:flex;align-items:center;gap:10px"><svg width="14" height="14"><rect x="1.5" y="1.5" width="11" height="11" fill="none" stroke="#d6def0" stroke-width="1.5"></rect></svg>Breaker open</div>
+        </div>
+      </div>
+
+      <!-- ================= VIEW D: SUMMARY ================= -->
+      <div class="pf-view" id="view-summary" hidden>
+        <div class="abs" style="left:40px;right:40px;top:124px;display:flex;gap:60px">
+          <div style="width:580px;display:flex;flex-direction:column;gap:32px">
+            <div class="col">
+              <span class="lbl">Home demand</span>
+              <span class="num" style="font-size:72px;font-weight:600;line-height:1" data-bind="home.power"></span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:12px">
+              <span style="font-size:15px">Home is powered by</span>
+              <div class="bar">
+                <div id="sum-in-solar" style="background:var(--pf-solar);width:0"></div>
+                <div id="sum-in-grid"  style="background:var(--pf-import);width:0"></div>
+                <div id="sum-in-batt"  style="background:var(--pf-battery);width:0"></div>
+              </div>
+              <div class="legend">
+                <div><span class="sw" style="background:var(--pf-solar)"></span>Solar <b data-bind="mix.inSolar"></b></div>
+                <div><span class="sw" style="background:var(--pf-import)"></span>Grid <b data-bind="mix.inGrid"></b></div>
+                <div><span class="sw" style="background:var(--pf-battery)"></span>Battery <b data-bind="mix.inBatt"></b></div>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:12px">
+              <span style="font-size:15px">Solar output is going to</span>
+              <div class="bar">
+                <div id="sum-out-home" style="background:var(--pf-home);width:0"></div>
+                <div id="sum-out-grid" style="background:var(--pf-export);width:0"></div>
+                <div id="sum-out-batt" style="background:var(--pf-battery);width:0"></div>
+              </div>
+              <div class="legend">
+                <div><span class="sw" style="background:var(--pf-home)"></span>Home <b data-bind="mix.outHome"></b></div>
+                <div><span class="sw" style="background:var(--pf-export)"></span>Grid export <b data-bind="mix.outGrid"></b></div>
+                <div><span class="sw" style="background:var(--pf-battery)"></span>Battery <b data-bind="mix.outBatt"></b></div>
+              </div>
+            </div>
+          </div>
+
+          <div style="flex-grow:1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-content:start">
+            <div class="tile"><div class="tile-h" style="color:var(--pf-solar)"><i data-icon="sun" data-size="22"></i><span>Solar</span></div>
+              <span class="num" style="font-size:34px;font-weight:600" data-bind="solar.power"></span>
+              <span class="sub"><span class="num" data-bind="solar.today"></span> today</span></div>
+            <div class="tile"><div class="tile-h" style="color:var(--pf-home)"><i data-icon="home" data-size="22"></i><span>Home</span></div>
+              <span class="num" style="font-size:34px;font-weight:600" data-bind="home.power"></span>
+              <span class="sub"><span class="num" data-bind="home.today"></span> today</span></div>
+            <div class="tile"><div class="tile-h" id="sum-ico-grid"><i data-icon="grid" data-size="22"></i><span>Grid</span></div>
+              <span class="num" style="font-size:34px;font-weight:600" data-bind="grid.power"></span>
+              <span class="sub" data-bind="grid.state" data-color="grid.stateColor"></span></div>
+            <div class="tile"><div class="tile-h" id="sum-ico-batt"><i data-icon="battery" data-size="22"></i><span>Battery</span></div>
+              <span class="num" style="font-size:34px;font-weight:600" data-bind="battery.power" data-color="battery.valueColor"></span>
+              <span class="sub"><span data-bind="battery.state"></span>, <span class="num" data-bind="battery.soc"></span> charged</span></div>
+          </div>
+        </div>
+
+        <div class="abs footer" style="top:650px;padding-top:20px;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;justify-content:space-between" class="sub">
+            <span>Today: solar produced <b class="num" style="color:var(--pf-text);font-weight:500" data-bind="solar.today"></b> of the <b class="num" style="color:var(--pf-text);font-weight:500" data-bind="home.today"></b> your home used</span>
+            <span>Net grid <b class="num" style="color:var(--pf-text);font-weight:500" data-bind="grid.netToday"></b> <span data-bind="grid.netDir"></span></span>
+          </div>
+          <div style="height:8px;border-radius:4px;background:var(--pf-track);overflow:hidden">
+            <div id="sum-today-bar" style="height:8px;width:0;background:var(--pf-solar);transition:width .6s ease"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+      <!-- ================= VIEW S: EXISTING SANKEY (unchanged, 4th view) ================= -->
+      <div class="pf-view" id="view-sankey" hidden>
+        <svg id="flow" viewBox="0 0 1000 440" style="position:absolute;left:0;top:60px;width:100%;height:auto">
+          <!-- links (behind nodes) -->
+          <path class="link-base" id="path-solar"   d="M 170 70  C 300 70, 340 70, 460 150"/>
+          <path class="link-hot"   id="hot-solar"   d="M 170 70  C 300 70, 340 70, 460 150" stroke="var(--solar)"/>
+          <path class="link-base" id="path-grid"   d="M 170 330 C 300 330, 340 250, 460 220"/>
+          <path class="link-hot"   id="hot-grid"    d="M 170 330 C 300 330, 340 250, 460 220" stroke="var(--blue)"/>
+          <path class="link-base" id="path-batt"   d="M 500 380 C 520 360, 560 320, 600 260"/>
+          <path class="link-hot"   id="hot-batt"    d="M 500 380 C 520 360, 560 320, 600 260" stroke="var(--orange)"/>
+          <!-- particles -->
+          <circle class="particle" id="p-solar-0" r="6" fill="var(--solar)"/>
+          <circle class="particle" id="p-solar-1" r="4" fill="var(--solar)"/>
+          <circle class="particle" id="p-grid-0"  r="6" fill="var(--blue)"/>
+          <circle class="particle" id="p-grid-1"  r="4" fill="var(--blue)"/>
+          <circle class="particle" id="p-batt-0"  r="6" fill="var(--orange)"/>
+          <circle class="particle" id="p-batt-1"  r="4" fill="var(--orange)"/>
+          <!-- nodes -->
+          <g data-tip="<b>Solar</b><br>PV generation. Flows: home first → battery charge → grid export.">
+            <rect class="node-box" x="20" y="30" width="150" height="80"/>
+            <text class="node-title" x="38" y="56">SOLAR</text>
+            <text class="node-val" id="n-solar" x="38" y="90">— kW</text>
+            <text class="node-sub" id="n-solar-sub" x="38" y="104">today — kWh</text>
+            <g class="flow-info"><circle cx="166" cy="38" r="13"/><text x="166" y="44" text-anchor="middle" font-size="17">i</text></g>
+          </g>
+          <g data-tip="<b>Grid</b><br>Utility connection. Import (buying) shown red-tinted; export (surplus) green-tinted. Today = import vs export.">
+            <rect class="node-box" x="20" y="290" width="150" height="80"/>
+            <text class="node-title" x="38" y="316">GRID</text>
+            <text class="node-val" id="n-grid" x="38" y="350">— kW</text>
+            <text class="node-sub" id="n-grid-sub" x="38" y="364">importing</text>
+            <g class="flow-info"><circle cx="166" cy="298" r="13"/><text x="166" y="304" text-anchor="middle" font-size="17">i</text></g>
+          </g>
+          <g data-tip="<b>Battery</b><br>Powerwall pack. Discharging = feeding the home; charging = storing energy. Today = charged / discharged.">
+            <rect class="node-box" x="380" y="380" width="220" height="52"/>
+            <text class="node-title" x="398" y="404">BATTERY</text>
+            <text class="node-val" id="n-batt" x="398" y="424" font-size="16">— kW</text>
+            <text class="node-sub" id="n-batt-sub" x="510" y="424">—</text>
+            <g class="flow-info"><circle cx="596" cy="386" r="13"/><text x="596" y="392" text-anchor="middle" font-size="17">i</text></g>
+          </g>
+          <g data-tip="<b>Home</b><br>Total consumption of your house. Supplied by solar, battery and grid in order of preference.">
+            <rect class="node-box" x="460" y="150" width="200" height="110"/>
+            <text class="node-title" x="480" y="182">HOME</text>
+            <text class="node-val" id="n-home" x="480" y="216">— kW</text>
+            <text class="node-sub" id="n-home-sub" x="480" y="238">today — kWh</text>
+            <g class="flow-info"><circle cx="656" cy="156" r="13"/><text x="656" y="162" text-anchor="middle" font-size="17">i</text></g>
+          </g>
+          <!-- net badge near grid -->
+          <text id="flow-net" x="980" y="54" text-anchor="end" font-size="14" font-weight="700" fill="var(--muted)">—</text>
+        </svg>
+      </div>
+  </div>
+  <div class="pf-pan-hint" id="pf-pan-hint">⟷ swipe to pan</div>
+  <p class="pf-error" id="pf-error" role="status"></p>
+</section>
+</div>
+
+<div class="section" id="summary" data-tip="<b>Energy Summary</b><br>Cumulative energy (kWh) per period, integrated from every poll. <br><b>Import</b> = bought from grid. <b>Export</b> = sent to grid. <b>Net</b> = import − export. <br>Verdict compares grid import vs solar produced."><i class="info-ico">i</i>
+  <h2>Energy Summary — import vs produced</h2>
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-period="today">Today</button>
+    <button class="tab" data-period="last_n_days" data-n="7">7 Days</button>
+    <button class="tab" data-period="this_month">This Month</button>
+    <button class="tab" data-period="last_month">Last Month</button>
+    <button class="tab" data-period="this_quarter">This Quarter</button>
+    <button class="tab" data-period="last_quarter">Last Quarter</button>
+    <button class="tab" data-period="this_year">This Year</button>
+    <button class="tab" data-period="last_year">Last Year</button>
+  </div>
+  <div class="sum-grid" id="sum-grid"><div class="sum-item" style="grid-column:1/-1"><h3>Loading…</h3></div></div>
+  <div class="bars">
+    <div>
+      <div class="bar-row"><div class="lbl"><span>Grid Import</span><b id="bar-import-lbl">—</b></div>
+        <div class="bar-track"><div class="bar-fill" id="bar-import" style="background:var(--red)"></div></div></div>
+      <div class="bar-row"><div class="lbl"><span>Grid Export</span><b id="bar-export-lbl">—</b></div>
+        <div class="bar-track"><div class="bar-fill" id="bar-export" style="background:var(--green)"></div></div></div>
+    </div>
+    <div>
+      <div class="bar-row"><div class="lbl"><span>Solar Produced</span><b id="bar-solar-lbl">—</b></div>
+        <div class="bar-track"><div class="bar-fill" id="bar-solar" style="background:var(--solar)"></div></div></div>
+      <div class="bar-row"><div class="lbl"><span>Home Consumed</span><b id="bar-home-lbl">—</b></div>
+        <div class="bar-track"><div class="bar-fill" id="bar-home" style="background:var(--text)"></div></div></div>
+    </div>
+  </div>
+  <div class="verdict flat" id="verdict">—</div>
+</div>
+
+<div class="section" data-tip="<b>History</b><br>SoE and grid power over time, sampled every poll. <br>Pick 6h / 24h / 3d / 7d. Green = battery %, blue = grid kW (up = importing)."><i class="info-ico">i</i>
+  <h2>History</h2>
+  <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+    <button class="tab" data-hours="6">6h</button>
+    <button class="tab active" data-hours="24">24h</button>
+    <button class="tab" data-hours="72">3d</button>
+    <button class="tab" data-hours="168">7d</button>
+  </div>
+  <div id="chart-wrap"><canvas id="hist" height="120"></canvas></div>
+</div>
+
+<div class="section">
+  <h2>System</h2>
+  <div class="mode-strip">
+    <div class="ms" data-tip="<b>Operating Mode</b><br>How the Powerwall manages energy. <b>self_consumption</b> = use solar, store surplus, avoid grid; <b>backup</b> = grid-down mode; <b>charge</b> = charge from grid."><i class="info-ico">i</i><span>MODE</span><b id="ms-mode">—</b></div>
+    <div class="ms" data-tip="<b>Backup Reserve</b><br>Minimum State-of-Energy kept in reserve for backup power (e.g. during a grid outage)."><i class="info-ico">i</i><span>RESERVE</span><b id="ms-reserve">—</b></div>
+    <div class="ms" data-tip="<b>Sitemaster</b><br>The Powerwall's control unit. 'running' = healthy and controlling the pack."><i class="info-ico">i</i><span>SITEMASTER</span><b id="ms-sm">—</b></div>
+    <div class="ms" data-tip="<b>Pack Capacity</b><br>Total usable energy of the battery pack (from the gateway)."><i class="info-ico">i</i><span>CAPACITY</span><b id="ms-cap">—</b></div>
+    <div class="ms" data-tip="<b>Poll</b><br>Number of successful polls since the dashboard started. Polls every N seconds."><i class="info-ico">i</i><span>POLLS</span><b id="ms-polls">—</b></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmtKw = w => w==null ? '—' : (Math.abs(w)>=1000 ? (w/1000).toFixed(2)+' kW' : Math.round(w)+' W');
+const S = {};
+let cfgIv = null;
+
+// ---------- info popover (click/tap the ⓘ — no hover) ----------
+const tip = $('tooltip');
+let activeIco = null;
+function closeTip(){
+  tip.style.display='none';
+  if(activeIco){ activeIco.classList.remove('on'); activeIco=null; }
+}
+function openTip(ico){
+  const src = ico.closest('[data-tip]');
+  if(!src){ return; }
+  const wasOpen = (activeIco === ico && tip.style.display === 'block');
+  if(wasOpen){ closeTip(); return; }           // same icon → toggle off
+  activeIco = ico; ico.classList.add('on');
+  tip.innerHTML = src.getAttribute('data-tip') + '<button class="tip-x" aria-label="close">×</button>';
+  tip.style.display='block';
+  const r = ico.getBoundingClientRect();
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let left = Math.min(r.left + r.width/2 - tw/2, innerWidth - tw - 8);
+  left = Math.max(8, left);
+  let top = r.bottom + 8;
+  if(top + th > innerHeight - 8) top = Math.max(8, r.top - th - 8);  // flip above
+  tip.style.left = left+'px'; tip.style.top = top+'px';
+}
+// click/tap on any ⓘ (HTML or inside the SVG)
+document.addEventListener('click', e => {
+  const ico = e.target.closest('.info-ico, .flow-info');
+  if(ico) openTip(ico.closest('.flow-info') || ico);
+}, true);
+// click anywhere else → close
+document.addEventListener('pointerdown', e => {
+  if(tip.style.display === 'block' && !e.target.closest('#tooltip')
+     && !e.target.closest('.info-ico') && !e.target.closest('.flow-info')) closeTip();
+}, {passive:true});
+// × close button (injected into the popover)
+tip.addEventListener('click', e => { if(e.target.classList.contains('tip-x')) closeTip(); });
+document.addEventListener('keydown', e => { if(e.key === 'Escape') closeTip(); });
+
+// ---------- power flow animation ----------
+const flow = {
+  solar: {path:$('path-solar'), parts:[$('p-solar-0'),$('p-solar-1')], phase:0, dir:1, speed:0, active:false},
+  grid:  {path:$('path-grid'),  parts:[$('p-grid-0'),$('p-grid-1')],  phase:0, dir:1, speed:0, active:false},
+  batt:  {path:$('path-batt'),  parts:[$('p-batt-0'),$('p-batt-1')],  phase:0, dir:1, speed:0, active:false},
+};
+function fitFlow(){
+  // On mobile, zoom the viewBox into the drawn region (x 10-700) so the
+  // diagram renders ~40% larger; on desktop use the full canvas.
+  const mobile = innerWidth < 700;
+  $('flow').setAttribute('viewBox', mobile ? '10 20 690 420' : '0 0 1000 440');
+  $('flow-net').setAttribute('x', mobile ? 685 : 980);
+  $('flow-net').setAttribute('y', mobile ? 48 : 54);
+  $('flow-net').setAttribute('font-size', mobile ? 15 : 14);
+  for(const k in flow){ flow[k].len = flow[k].path.getTotalLength(); }
+}
+for(const k in flow){ flow[k].len = flow[k].path.getTotalLength(); }
+fitFlow(); // apply mobile zoom on load, not only on resize
+function setFlow(key, watts, reverse){
+  const f = flow[key];
+  f.dir = reverse ? -1 : 1;
+  const mag = Math.abs(watts||0);
+  f.speed = mag>0 ? Math.min(0.9, 0.12 + mag/2500) : 0;
+  f.active = mag > 15;
+}
+let lastT = performance.now();
+function animate(now){
+  const dt = Math.min((now-lastT)/1000, 0.1); lastT = now;
+  for(const k in flow){
+    const f = flow[k];
+    if(f.active) f.phase = (f.phase + f.speed*f.dir*dt) % 1;
+    const p = f.phase<0 ? f.phase+1 : f.phase;
+    f.parts.forEach((el,i) => {
+      const pp = (p + i*0.5) % 1;
+      const pt = f.path.getPointAtLength(pp * f.len);
+      el.setAttribute('cx', pt.x); el.setAttribute('cy', pt.y);
+      el.style.opacity = f.active ? 1 : 0.15;
+    });
+  }
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+// pause icon SMIL for users who prefer reduced motion
+if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  document.querySelectorAll('.card-ico-wrap svg').forEach(s => {
+    if (typeof s.pauseAnimations === 'function') s.pauseAnimations();
+  });
+}
+
+
+// global data adapter for the power-flow widget (mirrors the widget's CONFIG signs)
+function mapToPowerFlow(payload){
+  const s=(payload&&payload.snapshot)||null, te=(payload&&payload.today_energy)||null;
+  const n=x=>x==null?null:(Number.isFinite(+x)?+x:null);
+  const imp=te?n(te.import_kwh):null, exp=te?n(te.export_kwh):null;
+  const net=(imp!=null&&exp!=null)?imp-exp:null;
+  return { timestamp:s?s.ts*1000:null,
+    solar:{powerW:s?n(s.solar_w):null, todayKWh:te?n(te.solar_kwh):null},
+    home:{powerW:s?n(s.house_w):null, todayKWh:te?n(te.house_kwh):null, selfPoweredPct:null},
+    grid:{powerW:s?n(s.grid_w):null, netTodayKWh:net},
+    battery:{powerW:s?n(s.battery_w):null, socPct:s?n(s.soe_pct):null} };
+}
+
+// ---------- status poll ----------
+async function refresh(){
+  let d = null;
+  try{ d = await (await fetch('/api/status')).json(); }catch(e){}
+  const s = d ? d.snapshot : null;
+  const te = d ? d.today_energy : null;
+  const dot = $('status-dot');
+  if(!s){ dot.className='dot err'; $('status-text').textContent='gateway unreachable'; }
+  else if(d.last_error){ dot.className='dot warn'; $('status-text').textContent='recovering…'; }
+  else { dot.className='dot'; $('status-text').textContent='live'; }
+  $('updated').textContent = s ? new Date(s.ts*1000).toLocaleTimeString() : '—';
+  if(d) $('poll-count').textContent = d.poll_count;
+  $('interval').textContent = cfgIv ?? '—';
+  if(!s || !te) return;
+
+  // feed the power-flow widget from the same poll (no separate loop)
+  if(window.PowerFlow){
+    if(s && te){ try{ window.PowerFlow.update(mapToPowerFlow({snapshot:s, today_energy:te})); }catch(e){ console.error('[PowerFlow] update failed', e);} }
+    else { try{ window.PowerFlow.showError('Live data unavailable: gateway unreachable.'); }catch(e){} }
+  }
+
+  const cap = s.capacity_wh ? s.capacity_wh/1000 : 0;
+  const rem = s.energy_remaining_wh ? s.energy_remaining_wh/1000 : null;
+
+  // SoE gauge
+  const soe = s.soe_pct;
+  $('soe-val').textContent = soe!=null ? Math.round(soe)+'%' : '—';
+  $('soe-pct').textContent = soe!=null ? soe.toFixed(1)+'%' : '—';
+  const C = 226.2;
+  $('gauge-arc').style.strokeDashoffset = C - (soe!=null ? C*soe/100 : 0);
+  $('gauge-arc').style.stroke = soe<15 ? 'var(--red)' : soe<35 ? 'var(--amber)' : 'var(--green)';
+  $('soe-sub').innerHTML = `capacity ${cap.toFixed(1)} kWh${rem!=null?` · <b>${rem.toFixed(2)} kWh left</b>`:''}`+
+    (s.hours_remaining!=null?` · ~${s.hours_remaining.toFixed(1)} h at draw`:'');
+
+  // battery
+  const bw = s.battery_w;
+  $('batt-val').textContent = bw!=null ? (Math.abs(bw)/1000).toFixed(2) : '—';
+  const bBadge = $('batt-badge');
+  if(bw==null){ bBadge.textContent='—'; }
+  else if(bw>15){ bBadge.textContent='⚡ discharging'; bBadge.className='badge dis'; }
+  else if(bw<-15){ bBadge.textContent='↑ charging'; bBadge.className='badge chg'; }
+  else { bBadge.textContent='idle'; bBadge.className='badge chg'; }
+  const bd = te.batt_discharge_kwh||0, bc = te.batt_charge_kwh||0;
+  $('batt-sub').innerHTML = `today: <span class="dn">${bd.toFixed(2)} kWh out</span> · <span class="up">${bc.toFixed(2)} kWh in</span>`;
+
+  // home
+  const hw = s.house_w;
+  $('home-val').textContent = hw!=null ? (hw/1000).toFixed(2) : '—';
+  $('home-sub').innerHTML = `today: <b>${(te.house_kwh||0).toFixed(2)} kWh</b>`;
+
+  // grid
+  const gw = s.grid_w;
+  $('grid-val').textContent = gw!=null ? Math.abs(gw/1000).toFixed(2) : '—';
+  const gBadge = $('grid-badge');
+  if(gw==null){ gBadge.textContent='—'; }
+  else if(gw>15){ gBadge.textContent='⬇ importing'; gBadge.className='badge in'; }
+  else if(gw<-15){ gBadge.textContent='⬆ exporting'; gBadge.className='badge out'; }
+  else { gBadge.textContent='balanced'; gBadge.className='badge chg'; }
+  const gi = te.import_kwh||0, ge = te.export_kwh||0;
+  const net = gi-ge;
+  $('grid-sub').innerHTML = `today: <span class="rd">${gi.toFixed(2)} in</span> · <span class="up">${ge.toFixed(2)} out</span>`+
+    ` · net <b>${net>0.005?'+':''}${net.toFixed(2)} kWh</b>`;
+
+  // solar
+  const sw = s.solar_w;
+  $('solar-val').textContent = sw!=null ? (sw/1000).toFixed(2) : '—';
+  $('solar-sub').innerHTML = `today: <b>${(te.solar_kwh||0).toFixed(2)} kWh</b>`;
+
+  // net banner: consuming from grid more than we produce
+  const banner = $('net-banner');
+  if(gw>15){
+    banner.className='show imp';
+    banner.innerHTML = `⚠ Importing ${fmtKw(gw)} from grid — home draw exceeds solar + battery. Today's net grid: <b>+${net.toFixed(2)} kWh</b>`;
+  } else if(gw<-15){
+    banner.className='show exp';
+    banner.innerHTML = `✓ Exporting ${fmtKw(Math.abs(gw))} to grid — producing more than the home needs. Today's net grid: <b>${net.toFixed(2)} kWh</b>`;
+  } else {
+    banner.className='show mid';
+    banner.innerHTML = `≈ Balanced — supply matches demand. Today's net grid: <b>${net.toFixed(2)} kWh</b>`;
+  }
+
+  // power flow
+  const importing = gw>15;
+  setFlow('solar', Math.max(0, sw||0), false);
+  $('hot-solar').style.opacity = (sw||0)>15 ? .3 : 0;
+  setFlow('grid', Math.abs(gw||0), !importing); // import: grid→house (dir +1); export: house→grid
+  $('hot-grid').style.stroke = importing ? 'var(--red)' : 'var(--green)';
+  $('hot-grid').style.opacity = Math.abs(gw||0)>15 ? .3 : 0;
+  const charging = (bw||0) < -15;
+  // path-batt runs battery(500,380) -> home(600,260). dir=+1 animates particles
+  // from the battery end toward the home end. So:
+  //   charging  (energy INTO the battery)  -> dir=-1 (particles head to the battery)
+  //   discharging (energy OUT of battery) -> dir=+1 (particles head to the home)
+  setFlow('batt', Math.abs(bw||0), charging);
+  $('hot-batt').style.stroke = charging ? 'var(--green)' : 'var(--orange)';
+  // ----- card icons -----
+  const icSolar = $('c-solar').querySelector('.card-ico-wrap svg');
+  const icHome  = $('c-home').querySelector('.card-ico-wrap svg');
+  const icGrid  = $('c-grid').querySelector('.card-ico-wrap svg');
+  const icBatt  = $('c-batt').querySelector('.card-ico-wrap svg');
+  const solarActive = (sw||0) > 15;
+  const homeActive  = (hw||0) > 15;
+  const gridActive  = Math.abs(gw||0) > 15;
+  const battActive  = Math.abs(bw||0) > 15;
+
+  // solar: glow the sun when it's producing, dim when idle
+  if(icSolar) icSolar.classList.toggle('dim', !solarActive);
+
+  // home: keep the lightbulb glow going (house always drawing when >15W)
+  if(icHome) icHome.classList.toggle('dim', !homeActive);
+
+  // grid: pulse colour + breathing
+  if(icGrid){
+    const gImport = gw > 15, gExport = gw < -15;
+    icGrid.querySelectorAll('.ico-pulse').forEach(p => {
+      p.setAttribute('fill', gImport ? '#ff5c5c' : (gExport ? '#3ddc84' : '#7fb0ff'));
+    });
+    const glow = icGrid.querySelector('g[filter]');
+    if(glow){
+      glow.classList.toggle('ico-glow-active', gridActive);
+      // idle (balanced): hide the pulses
+      glow.style.opacity = gridActive ? 1 : .25;
+    }
+  }
+
+  // battery: liquid fill tracks SoC; colour = charge(discharge) state
+  if(icBatt){
+    const lvl = icBatt.querySelector('#pf-batt-level');
+    if(lvl && soe != null){
+      lvl.setAttribute('transform', `translate(35 ${77 - 54 * soe / 100})`);
+    }
+    const wave = icBatt.querySelector('.ico-wave');
+    const fillCol = (bw||0) < -15 ? 'url(#pf-batt-fill)' : 'url(#pf-batt-fill)';
+    // recolour: charge = green, discharge = orange, idle = amber (default)
+    const col = (bw||0) < -15 ? '#3ddc84' : (bw||0) > 15 ? '#f08a3c' : '#ffb84d';
+    // wave crest colour via a small tinted overlay is complex; instead tint the shell stroke + bolt
+    icBatt.querySelectorAll('rect[stroke="#f0a36a"]').forEach(r => r.setAttribute('stroke', col));
+    icBatt.querySelectorAll('rect[stroke-opacity="0.6"]').forEach(r => r.setAttribute('stroke', col));
+    // dim the bolt glow when idle
+    const bolt = icBatt.querySelector('path[filter]');
+    if(bolt) bolt.style.opacity = battActive ? 1 : .35;
+  }
+
+  $('hot-batt').style.opacity = Math.abs(bw||0)>15 ? .3 : 0;
+
+  // flow node labels
+  $('n-solar').textContent = fmtKw(sw);
+  $('n-solar-sub').textContent = 'today '+(te.solar_kwh||0).toFixed(1)+' kWh';
+  $('n-grid').textContent = fmtKw(Math.abs(gw));
+  $('n-grid-sub').textContent = importing ? 'importing (buying)' : (gw<-15 ? 'exporting (selling)' : 'balanced');
+  $('n-grid-sub').setAttribute('fill', importing ? 'var(--red)' : (gw<-15 ? 'var(--green)' : 'var(--muted)'));
+  $('n-batt').textContent = fmtKw(Math.abs(bw));
+  $('n-batt-sub').textContent = charging ? 'charging' : 'discharging';
+  $('n-batt-sub').setAttribute('fill', charging ? 'var(--green)' : 'var(--orange)');
+  $('n-home').textContent = fmtKw(hw);
+  $('n-home-sub').textContent = 'today '+(te.house_kwh||0).toFixed(1)+' kWh';
+  { const t=$('flow-net'); const isMob = innerWidth < 700;
+    let txt = `NET GRID  ${net>0.005?'+':''}${net.toFixed(2)} kWh today`;
+    if(isMob){ t.textContent=txt;
+      const bb=t.getBBox(), vb=$('flow').viewBox.baseVal;
+      if((bb.x+bb.width) > (vb.x+vb.width)) t.textContent = `NET  ${net>0.005?'+':''}${net.toFixed(2)} kWh`; }
+    else t.textContent = txt; }
+  $('flow-net').setAttribute('fill', net>0.005 ? 'var(--red)' : (net<-0.005 ? 'var(--green)' : 'var(--muted)'));
+
+  // system strip
+  $('ms-mode').textContent = s.mode||'—';
+  $('ms-reserve').textContent = s.backup_reserve_pct!=null ? s.backup_reserve_pct.toFixed(0)+'%' : '—';
+  $('ms-sm').textContent = s.sitemaster_up ? 'running' : '—';
+  $('ms-cap').textContent = cap ? cap.toFixed(1)+' kWh' : '—';
+  if(d) $('ms-polls').textContent = d.poll_count;
+}
+
+// ---------- energy summary tabs ----------
+let activePeriod = 'today', activeN = 7;
+async function loadSummary(){
+  const n = activeN||7;
+  const url = '/api/energy?period='+activePeriod+(activePeriod==='last_n_days'?'&n='+n:'');
+  try{
+    const e = await (await fetch(url)).json();
+    const gi = e.import_kwh||0, ge = e.export_kwh||0, net = gi-ge;
+    const sol = e.solar_kwh||0, ho = e.house_kwh||0;
+    const bc = e.batt_charge_kwh||0, bd = e.batt_discharge_kwh||0;
+    const cost = e.import_cost;
+    const grid = [
+      ['Grid Import', gi, 'bought from utility', e.tariff_zar_kwh>0 ? `≈ R${cost.toFixed(2)}` : 'set tariff in config to see cost', 'var(--red)'],
+      ['Grid Export', ge, 'sent to utility', 'no credit (per your setup)', 'var(--green)'],
+      ['Net Grid', Math.abs(net), (net>0.005?'imported more than exported':'exported more than imported') + ` (${net>0.005?'+':''}${net.toFixed(1)} kWh)`, null, net>0.005?'var(--red)':(net<-0.005?'var(--green)':'var(--muted)')],
+      ['Solar', sol, 'produced by PV', null, 'var(--solar)'],
+      ['Home', ho, 'consumed', null, 'var(--text)'],
+      ['Battery', bd, `${(bd/1000).toFixed(1)} kWh out · ${(bc/1000).toFixed(1)} kWh in`, null, 'var(--orange)'],
+    ];
+    $('sum-grid').innerHTML = grid.map(g =>
+      `<div class="sum-item" data-tip="<b>${g[0]}</b><br>${g[2]}"><i class="info-ico">i</i>
+        <h3>${g[0]}</h3>
+        <div class="v" style="color:${g[4]}">${g[1].toFixed(2)} <small>kWh</small></div>
+        <div class="d">${g[3]||''}</div>
+      </div>`).join('');
+    const maxE = Math.max(gi, ge, sol, ho, 1);
+    const setBar = (id, lbl, v) => { $(id).style.width = (v/maxE*100).toFixed(1)+'%'; $(lbl).textContent = v.toFixed(2)+' kWh'; };
+    setBar('bar-import','bar-import-lbl',gi); setBar('bar-export','bar-export-lbl',ge);
+    setBar('bar-solar','bar-solar-lbl',sol); setBar('bar-home','bar-home-lbl',ho);
+    const v = $('verdict');
+    if(gi > sol + 0.005){
+      v.className='verdict neg';
+      v.innerHTML = `⚠ Imported more from grid than solar produced: <b>${gi.toFixed(2)} kWh imported</b> vs ${sol.toFixed(2)} kWh solar — net grid ${net.toFixed(2)} kWh over this period`;
+    } else if(ge > 0.005 || (sol > gi + 0.005 && sol>0)){
+      v.className='verdict pos';
+      v.innerHTML = `✓ Producing more than consuming: solar ${sol.toFixed(2)} kWh vs ${gi.toFixed(2)} kWh imported — net grid ${net.toFixed(2)} kWh over this period`;
+    } else {
+      v.className='verdict flat';
+      v.innerHTML = `≈ Roughly balanced: import ${gi.toFixed(2)} kWh ≈ solar ${sol.toFixed(2)} kWh`;
+    }
+    if(e.months_missing>0) v.innerHTML += ` <span style="color:var(--muted);font-weight:400">(data beyond 90 days not yet recorded for ${e.months_missing} month(s))</span>`;
+  }catch(e){ console.error(e); }
+}
+document.querySelectorAll('#tabs .tab').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#tabs .tab').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  activePeriod = b.dataset.period; activeN = parseInt(b.dataset.n||7);
+  loadSummary();
+}));
+const histTabs = document.querySelectorAll('[data-hours]');
+histTabs.forEach(b => b.addEventListener('click', () => {
+  histTabs.forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  loadHistory(parseInt(b.dataset.hours));
+}));
+
+// ---------- history chart ----------
+let chart = null;
+async function loadHistory(hours=24){
+  const r = await fetch('/api/history?hours='+hours);
+  const d = await r.json();
+  const rows = d.rows||[];
+  const labels = rows.map(x=>new Date(x.ts*1000).toLocaleString([],{hour:'2-digit',minute:'2-digit'}));
+  const soe = rows.map(x=>x.soe_pct!=null ? +x.soe_pct.toFixed(2) : null);
+  const gw = rows.map(x=>x.grid_w!=null ? +(x.grid_w/1000).toFixed(2) : null);
+  if(chart) chart.destroy();
+  chart = new Chart($('hist'), {
+    type:'line',
+    data:{labels, datasets:[
+      {label:'SoE %', data:soe, borderColor:'#3ddc84', backgroundColor:'rgba(61,220,132,.08)', yAxisID:'y', tension:.25, pointRadius:0, spanGaps:true, borderWidth:2},
+      {label:'Grid kW', data:gw, borderColor:'#4da6ff', borderDash:[6,4], yAxisID:'y1', tension:.25, pointRadius:0, spanGaps:true, borderWidth:2},
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{legend:{labels:{color:'#8fa3c0'}}, tooltip:{mode:'index',intersect:false}},
+      scales:{
+        x:{ticks:{color:'#8fa3c0',maxTicksLimit:10},grid:{color:'rgba(30,42,68,.5)'}},
+        y:{position:'left',title:{display:true,text:'SoE %',color:'#3ddc84'},ticks:{color:'#3ddc84'},grid:{color:'rgba(30,42,68,.5)'}},
+        y1:{position:'right',title:{display:true,text:'Grid kW',color:'#4da6ff'},ticks:{color:'#4da6ff'},grid:{drawOnChartArea:false}},
+      }
+    }
+  });
+}
+
+// ---------- config + loops ----------
+async function loadConfig(){ try{ cfgIv = (await (await fetch('/api/config')).json()).poll_interval_seconds; }catch(e){} }
+loadConfig(); refresh(); loadSummary(); loadHistory(24);
+fitFlow();
+window.addEventListener('resize', () => { fitFlow(); refresh(); });
+setInterval(refresh, 5000);
+setInterval(loadSummary, 60000);
+setInterval(loadHistory, 60000);
+setInterval(loadConfig, 300000);
+
+/* =====================================================================
+   POWER FLOW WIDGET - reference implementation (vanilla JS, no deps)
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  // ------------------------------------------------------------------
+  // CONFIG - the agent adjusts these to match the real data source
+  // ------------------------------------------------------------------
+  const CONFIG = {
+    pollMs: 10000,                 // matches the app's 10s poll                 // refresh interval
+    idleThresholdW: 50,           // |W| below this = idle / balanced
+    maxLinkPowerW: 10000,         // power that maps to the thickest line
+    gridImportIsPositive: true,   // true: +W = buying from grid, -W = selling
+    batteryDischargeIsPositive: true, // true: +W = discharging, -W = charging
+    netGridImportIsPositive: true,    // sign of the "net grid today" kWh value
+    storageKey: 'pf.selectedView',
+    defaultView: 'hub',
+    useSimulator: false            // set false once fetchPowerData() is wired
+  };
+
+  const LOG = '[PowerFlow]';
+  const COLORS = {
+    solar: '#f2c14e', home: '#d6def0', import: '#6aa6ff', export: '#3fd08f',
+    exportText: '#5fe0a5', battery: '#f0914a', idle: '#3a4763', muted: '#9ba8c4', text: '#eef2fa'
+  };
+
+  // ------------------------------------------------------------------
+  // ICONS (inline stroke SVG, currentColor)
+  // ------------------------------------------------------------------
+  const ICONS = {
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    home: '<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/>',
+    grid: '<path d="M12 2L7 22M12 2l5 20M5 7h14M6.5 12h11M9 17l6-5M15 17l-6-5"/>',
+    battery: '<rect x="7" y="4" width="10" height="17" rx="2"/><path d="M10 2h4M10 15h4M10 12h4"/>'
+  };
+  function renderIcons() {
+    document.querySelectorAll('#pf-root [data-icon]').forEach(el => {
+      const name = el.getAttribute('data-icon');
+      const size = el.getAttribute('data-size') || '32';
+      if (!ICONS[name]) { console.warn(LOG, 'unknown icon', name); return; }
+      el.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+      el.style.display = 'inline-flex';
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // HELPERS
+  // ------------------------------------------------------------------
+  const $ = id => document.getElementById(id);
+  function safeNum(v, fallback = null) {
+    const n = typeof v === 'string' ? parseFloat(v) : v;
+    return Number.isFinite(n) ? n : fallback;
+  }
+  function safeGet(obj, path, fallback = null) {
+    try {
+      const v = path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+      return v === undefined ? fallback : v;
+    } catch (e) { return fallback; }
+  }
+  function fmtPower(w) {
+    if (w == null) return '--';
+    const a = Math.abs(w);
+    return a < 1000 ? `${Math.round(a)} W` : `${(a / 1000).toFixed(2)} kW`;
+  }
+  function fmtKWh(k, digits = 1) { return k == null ? '--' : `${Math.abs(k).toFixed(Math.abs(k) >= 100 ? 0 : digits)} kWh`; }
+  function fmtPct(p, digits = 0) {
+    if (p == null) return '--';
+    if (p > 0 && p < 1) digits = 1;
+    return `${p.toFixed(digits)}%`;
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function linkWidth(w) { return 2 + 6 * clamp(Math.abs(w || 0) / CONFIG.maxLinkPowerW, 0, 1); }
+
+  // ------------------------------------------------------------------
+  // DATA SOURCE
+  // Expected raw shape (agent maps real fields into this):
+  // {
+  //   timestamp: ISO string or epoch ms,
+  //   solar:   { powerW, todayKWh },
+  //   home:    { powerW, todayKWh, selfPoweredPct? },
+  //   grid:    { powerW, netTodayKWh },
+  //   battery: { powerW, socPct? }
+  // }
+  // ------------------------------------------------------------------
+  // Data adapter: the app's /api/status payload -> normalized reference shape.
+  // Fields/signs confirmed from refresh(): grid + = import, battery + = discharge,
+  // net grid today = import_kwh - export_kwh (positive = net import).
+  function mapToPowerFlow(payload) {
+    const s  = (payload && payload.snapshot)     || null;
+    const te = (payload && payload.today_energy) || null;
+    const n  = (x) => (x == null ? null : (Number.isFinite(+x) ? +x : null));
+    const imp = te ? n(te.import_kwh) : null, exp = te ? n(te.export_kwh) : null;
+    const net = (imp != null && exp != null) ? imp - exp : null;
+    return {
+      timestamp: s ? s.ts * 1000 : null,
+      solar:   { powerW: s ? n(s.solar_w)   : null, todayKWh: te ? n(te.solar_kwh) : null },
+      home:    { powerW: s ? n(s.house_w)   : null, todayKWh: te ? n(te.house_kwh) : null, selfPoweredPct: null },
+      grid:    { powerW: s ? n(s.grid_w)    : null, netTodayKWh: net },
+      battery: { powerW: s ? n(s.battery_w) : null, socPct:     s ? n(s.soe_pct)  : null }
+    };
+  }
+  async function fetchPowerData() {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return mapToPowerFlow(await res.json());
+  }
+
+  // Simulator seeded with the values from the original screenshot
+  let simT = 0;
+  function simulate() {
+    simT += 1;
+    const solar = 7040 + Math.sin(simT / 4) * 900;
+    const home  = 7030 + Math.cos(simT / 3) * 1600;
+    const batt  = Math.sin(simT / 6) * 1800;            // + discharge, - charge
+    const grid  = home - solar - batt;                   // + import, - export
+    return {
+      timestamp: Date.now(),
+      solar:   { powerW: solar, todayKWh: 57.1 },
+      home:    { powerW: home,  todayKWh: 70.7, selfPoweredPct: null },
+      grid:    { powerW: grid,  netTodayKWh: 15.87 },
+      battery: { powerW: batt,  socPct: 72 }
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // NORMALIZE -> derived model used by every view
+  // Internal convention: grid + = import, battery + = discharge
+  // ------------------------------------------------------------------
+  function normalize(raw) {
+    const t = CONFIG.idleThresholdW;
+    const solarW = Math.max(0, safeNum(safeGet(raw, 'solar.powerW'), 0));
+    const homeW  = Math.max(0, safeNum(safeGet(raw, 'home.powerW'), 0));
+    let gridW = safeNum(safeGet(raw, 'grid.powerW'), 0);
+    let battW = safeNum(safeGet(raw, 'battery.powerW'), 0);
+    if (!CONFIG.gridImportIsPositive) gridW = -gridW;
+    if (!CONFIG.batteryDischargeIsPositive) battW = -battW;
+    let netKWh = safeNum(safeGet(raw, 'grid.netTodayKWh'));
+    if (netKWh != null && !CONFIG.netGridImportIsPositive) netKWh = -netKWh;
+    const soc = safeNum(safeGet(raw, 'battery.socPct'));
+    const selfPct = safeNum(safeGet(raw, 'home.selfPoweredPct'));
+
+    const gridMode = gridW > t ? 'import' : gridW < -t ? 'export' : 'balanced';
+    const battMode = battW > t ? 'discharging' : battW < -t ? 'charging' : 'idle';
+
+    // where home power comes from
+    const fromGrid = gridMode === 'import' ? gridW : 0;
+    const fromBatt = battMode === 'discharging' ? battW : 0;
+    const fromSolar = Math.max(0, homeW - fromGrid - fromBatt);
+    const inTotal = fromSolar + fromGrid + fromBatt || 1;
+
+    // where solar goes
+    const toGrid = gridMode === 'export' ? -gridW : 0;
+    const toBatt = battMode === 'charging' ? -battW : 0;
+    const toHome = Math.max(0, solarW - toGrid - toBatt);
+    const outTotal = toHome + toGrid + toBatt || 1;
+
+    const ts = safeGet(raw, 'timestamp');
+    const date = ts ? new Date(ts) : new Date();
+
+    return {
+      updated: isNaN(date) ? '--:--:--' : date.toLocaleTimeString(),
+      solarW, homeW, gridW, battW, gridMode, battMode,
+      solarToday: safeNum(safeGet(raw, 'solar.todayKWh')),
+      homeToday:  safeNum(safeGet(raw, 'home.todayKWh')),
+      netKWh, soc, selfPct,
+      mix: {
+        inSolar: 100 * fromSolar / inTotal, inGrid: 100 * fromGrid / inTotal, inBatt: 100 * fromBatt / inTotal,
+        outHome: 100 * toHome / outTotal, outGrid: 100 * toGrid / outTotal, outBatt: 100 * toBatt / outTotal,
+        solarActive: solarW > t
+      }
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // BINDINGS (text) - same keys used in all three views
+  // ------------------------------------------------------------------
+  function bindingValues(m) {
+    const gridState = { import: 'Importing', export: 'Exporting', balanced: 'Balanced' }[m.gridMode];
+    const battState = { charging: 'Charging', discharging: 'Discharging', idle: 'Idle' }[m.battMode];
+    return {
+      'solar.power': fmtPower(m.solarW),
+      'solar.today': fmtKWh(m.solarToday),
+      'home.power': fmtPower(m.homeW),
+      'home.today': fmtKWh(m.homeToday),
+      'home.selfPowered': m.selfPct == null ? '--' : fmtPct(m.selfPct),
+      'grid.power': fmtPower(m.gridW),
+      'grid.state': gridState,
+      'grid.stateColor': m.gridMode === 'export' ? COLORS.exportText : m.gridMode === 'import' ? COLORS.import : COLORS.muted,
+      'grid.netToday': fmtKWh(m.netKWh, 2),
+      'grid.netDir': m.netKWh == null ? '' : m.netKWh >= 0 ? 'imported' : 'exported',
+      'battery.power': fmtPower(m.battW),
+      'battery.valueColor': m.battMode === 'idle' ? COLORS.muted : COLORS.text,
+      'battery.state': battState,
+      'battery.soc': m.soc == null ? '--%' : fmtPct(m.soc),
+      'mix.inSolar': fmtPct(m.mix.inSolar), 'mix.inGrid': fmtPct(m.mix.inGrid), 'mix.inBatt': fmtPct(m.mix.inBatt),
+      'mix.outHome': fmtPct(m.mix.outHome, m.mix.outHome > 99 && m.mix.outHome < 100 ? 1 : 0),
+      'mix.outGrid': fmtPct(m.mix.outGrid), 'mix.outBatt': fmtPct(m.mix.outBatt)
+    };
+  }
+  function applyBindings(vals) {
+    document.querySelectorAll('#pf-root [data-bind]').forEach(el => {
+      const k = el.getAttribute('data-bind');
+      if (k in vals) el.textContent = vals[k];
+    });
+    document.querySelectorAll('#pf-root [data-color]').forEach(el => {
+      const k = el.getAttribute('data-color');
+      if (k in vals) el.style.color = vals[k];
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // LINK helper: base line + moving-dot overlay
+  // dir: 'fwd' (along path), 'rev', or null (idle)
+  // ------------------------------------------------------------------
+  function setLink(prefix, { color, width, dir }) {
+    const base = $(prefix + '-base'), flow = $(prefix + '-flow');
+    if (!base || !flow) { console.warn(LOG, 'missing link', prefix); return; }
+    if (!dir) {
+      base.setAttribute('stroke', COLORS.idle);
+      base.setAttribute('stroke-width', '2');
+      base.setAttribute('stroke-dasharray', '4 6');
+      flow.setAttribute('class', 'flow off');
+      return;
+    }
+    base.setAttribute('stroke', color);
+    if (width != null) base.setAttribute('stroke-width', width.toFixed(1));
+    base.removeAttribute('stroke-dasharray');
+    const cls = 'flow ' + dir;
+    if (flow.getAttribute('class') !== cls) flow.setAttribute('class', cls); // avoid restarting animation
+  }
+  const stroke = (id, c) => { const el = $(id); if (el) el.setAttribute('stroke', c); };
+  const fill   = (id, c) => { const el = $(id); if (el) el.setAttribute('fill', c); };
+  const color  = (id, c) => { const el = $(id); if (el) el.style.color = c; };
+
+  function gridColor(m)  { return m.gridMode === 'export' ? COLORS.export : m.gridMode === 'import' ? COLORS.import : COLORS.idle; }
+  function battColor(m)  { return m.battMode === 'idle' ? COLORS.idle : COLORS.battery; }
+  function homeColor(m)  { // color of the dominant source feeding home
+    const x = m.mix; return x.inSolar >= x.inGrid && x.inSolar >= x.inBatt ? COLORS.solar : x.inGrid >= x.inBatt ? COLORS.import : COLORS.battery;
+  }
+
+  // ------------------------------------------------------------------
+  // VIEW RENDERERS (attribute updates only - DOM is built once)
+  // ------------------------------------------------------------------
+  function renderHub(m) {
+    setLink('hub-solar', { color: COLORS.solar, width: linkWidth(m.solarW), dir: m.mix.solarActive ? 'fwd' : null });
+    setLink('hub-grid',  { color: gridColor(m), width: linkWidth(m.gridW), dir: m.gridMode === 'import' ? 'fwd' : m.gridMode === 'export' ? 'rev' : null });
+    setLink('hub-batt',  { color: COLORS.battery, width: linkWidth(m.battW), dir: m.battMode === 'discharging' ? 'fwd' : m.battMode === 'charging' ? 'rev' : null });
+    setLink('hub-home',  { color: homeColor(m), width: linkWidth(m.homeW), dir: m.homeW > CONFIG.idleThresholdW ? 'fwd' : null });
+
+    stroke('hub-ring-solar', m.mix.solarActive ? COLORS.solar : COLORS.idle);
+    stroke('hub-ring-home', COLORS.home);
+    stroke('hub-ring-grid', gridColor(m));
+    stroke('hub-ring-batt', battColor(m));
+    color('hub-ico-solar', m.mix.solarActive ? COLORS.solar : COLORS.muted);
+    color('hub-ico-home', COLORS.home);
+    color('hub-ico-grid', m.gridMode === 'balanced' ? COLORS.muted : gridColor(m));
+    color('hub-ico-batt', m.battMode === 'idle' ? COLORS.muted : COLORS.battery);
+
+    const arc = $('hub-soc-arc');
+    if (arc) {
+      const C = 389.6, pct = m.soc == null ? 0 : clamp(m.soc, 0, 100);
+      arc.setAttribute('stroke-dasharray', `${(C * pct / 100).toFixed(1)} ${C}`);
+      arc.style.display = m.soc == null ? 'none' : '';
+    }
+  }
+
+  function renderSchematic(m) {
+    const t = CONFIG.idleThresholdW;
+    setLink('sch-grid',  { color: gridColor(m), width: 3, dir: m.gridMode === 'import' ? 'fwd' : m.gridMode === 'export' ? 'rev' : null });
+    setLink('sch-solar', { color: COLORS.solar, width: 3, dir: m.mix.solarActive ? 'fwd' : null });
+    setLink('sch-batt',  { color: COLORS.battery, width: 3, dir: m.battMode === 'charging' ? 'fwd' : m.battMode === 'discharging' ? 'rev' : null });
+    setLink('sch-home',  { color: homeColor(m), width: 3, dir: m.homeW > t ? 'fwd' : null });
+
+    stroke('sch-box-utility', gridColor(m)); stroke('sch-meter', gridColor(m));
+    stroke('sch-box-array', m.mix.solarActive ? COLORS.solar : COLORS.idle);
+    stroke('sch-box-inv',   m.mix.solarActive ? COLORS.solar : COLORS.idle);
+    stroke('sch-box-batt',  battColor(m));
+    stroke('sch-box-home',  COLORS.home);
+    // breakers: closed + energized = branch color, closed + idle = idle color
+    fill('sch-brk-solar', m.mix.solarActive ? COLORS.solar : COLORS.idle);
+    fill('sch-brk-batt',  battColor(m));
+    fill('sch-brk-home',  homeColor(m));
+    color('sch-ico-grid', m.gridMode === 'balanced' ? COLORS.muted : gridColor(m));
+  }
+
+  function renderSummary(m) {
+    const setW = (id, pct) => { const el = $(id); if (el) el.style.width = `${clamp(pct, 0, 100)}%`; };
+    // keep a sliver visible for tiny non-zero shares
+    const vis = p => (p > 0 && p < 0.8 ? 0.8 : p);
+    setW('sum-in-solar', vis(m.mix.inSolar)); setW('sum-in-grid', vis(m.mix.inGrid)); setW('sum-in-batt', vis(m.mix.inBatt));
+    setW('sum-out-home', m.mix.solarActive ? vis(m.mix.outHome) : 0);
+    setW('sum-out-grid', m.mix.solarActive ? vis(m.mix.outGrid) : 0);
+    setW('sum-out-batt', m.mix.solarActive ? vis(m.mix.outBatt) : 0);
+    const todayPct = m.solarToday != null && m.homeToday ? 100 * m.solarToday / m.homeToday : 0;
+    setW('sum-today-bar', todayPct);
+    color('sum-ico-grid', m.gridMode === 'balanced' ? COLORS.muted : gridColor(m));
+    color('sum-ico-batt', m.battMode === 'idle' ? COLORS.muted : COLORS.battery);
+  }
+
+  function renderHeader(m) {
+    const t = $('pf-updated'); if (t) t.textContent = m.updated;
+    let text, dot;
+    if (m.gridMode === 'export')      { text = `Exporting ${fmtPower(m.gridW)}`; dot = COLORS.export; }
+    else if (m.gridMode === 'import') { text = `Importing ${fmtPower(m.gridW)}`; dot = COLORS.import; }
+    else if (m.mix.inSolar >= 99)     { text = 'Running on solar'; dot = COLORS.solar; }
+    else                              { text = 'Balanced'; dot = COLORS.muted; }
+    const pt = $('pf-pill-text'), pd = $('pf-pill-dot');
+    if (pt) pt.textContent = text;
+    if (pd) pd.style.background = dot;
+  }
+
+  // ------------------------------------------------------------------
+  // VIEW SWITCHER (persisted per browser)
+  // ------------------------------------------------------------------
+  const VIEWS = { hub: 'view-hub', schematic: 'view-schematic', summary: 'view-summary', sankey: 'view-sankey' };
+  const TITLES = { hub: 'Live power flow', schematic: 'Electrical overview', summary: 'Energy now', sankey: 'Where your power goes' };
+  let currentView = CONFIG.defaultView;
+
+  function loadView() {
+    try { const v = localStorage.getItem(CONFIG.storageKey); return VIEWS[v] ? v : CONFIG.defaultView; }
+    catch (e) { console.warn(LOG, 'storage unavailable', e); return CONFIG.defaultView; }
+  }
+  function setView(v) {
+    if (!VIEWS[v]) { console.warn(LOG, 'unknown view', v); v = CONFIG.defaultView; }
+    currentView = v;
+    Object.entries(VIEWS).forEach(([k, id]) => { const el = $(id); if (el) el.hidden = k !== v; });
+    document.querySelectorAll('#pf-root .pf-switch button').forEach(b =>
+      b.setAttribute('aria-pressed', String(b.dataset.view === v)));
+    const title = $('pf-title'); if (title) title.textContent = TITLES[v];
+    try { localStorage.setItem(CONFIG.storageKey, v); } catch (e) { /* non-fatal */ }
+    fitStage();
+  }
+
+  // ------------------------------------------------------------------
+  // SCALE 1280x760 stage to container width
+  // ------------------------------------------------------------------
+  function fitStage() {
+    const vp = $('pf-viewport'), st = $('pf-stage');
+    if (!vp || !st) return;
+    // All views live on the 1280x760 stage. Desktop: viewport wide enough for a
+    // ~1:1 fit. Mobile: a naive (vpWidth/1280) scale would crush the canvas to a
+    // ~0.22x sliver, so floor the scale at 0.65 (readable) and pan the overflow.
+    // We use CSS `zoom` (not transform:scale): zoom scales the LAYOUT box too,
+    // so the viewport's scroll region matches the visual width.
+    // On mobile the WIDE data rows (Flow footer, Summary grid) are reflowed via
+    // CSS to 2 columns, so the visible data fits without a long swipe.
+    const s = Math.max(vp.clientWidth / 1280, 0.65);
+    st.style.zoom = s;
+    st.style.transform = 'none';
+    vp.style.height = `${760 * s}px`;
+    const overflows = (1280 * s) > (vp.clientWidth + 1);
+    vp.style.overflowX = overflows ? 'auto' : 'hidden';
+    const hint = $('pf-pan-hint');
+    if (hint) hint.style.display = overflows ? 'block' : 'none';
+  }
+
+  // ------------------------------------------------------------------
+  // MAIN LOOP
+  // ------------------------------------------------------------------
+  let lastModel = null, timer = null;
+  function showError(msg) {
+    const e = $('pf-error'); if (!e) return;
+    e.textContent = msg || ''; e.classList.toggle('show', !!msg);
+  }
+  function renderAll(m) {
+    renderHeader(m);
+    applyBindings(bindingValues(m));
+    renderHub(m); renderSchematic(m); renderSummary(m); // cheap; keeps hidden views ready
+  }
+  async function tick() {
+    try {
+      const raw = CONFIG.useSimulator ? simulate() : await fetchPowerData();
+      lastModel = normalize(raw);
+      renderAll(lastModel);
+      showError('');
+    } catch (err) {
+      console.error(LOG, 'update failed', err);
+      showError(lastModel
+        ? `Live data paused: ${err.message}. Showing values from ${lastModel.updated}.`
+        : `Live data unavailable: ${err.message}.`);
+    }
+  }
+
+  function init() {
+    renderIcons();
+    document.querySelectorAll('#pf-root .pf-switch button').forEach(b =>
+      b.addEventListener('click', () => setView(b.dataset.view)));
+    setView(loadView());
+    fitStage();
+    if ('ResizeObserver' in window) new ResizeObserver(fitStage).observe($('pf-viewport'));
+    else window.addEventListener('resize', fitStage);
+    // The host (dashboard refresh loop) drives updates via PowerFlow.update().
+    // We still run one initial tick only if the host hasn't already provided data.
+    window.__PF_HOST_DRIVEN = true; // flag for the host
+    // No independent polling here: the app's refresh() calls PowerFlow.update().
+    console.info(LOG, 'initialized, view =', currentView);
+  }
+
+  // public API for the host app
+  window.PowerFlow = {
+    setView,
+    update: raw => { lastModel = normalize(raw); renderAll(lastModel); showError(''); },
+    pause: () => {}, config: CONFIG
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
+
+</script>
+</body>
+</html>

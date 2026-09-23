@@ -1,0 +1,17 @@
+# secrets — never commit
+config.json
+config.key
+
+# runtime data
+*.db
+*.db-wal
+*.db-shm
+logs/
+__pycache__/
+*.pyc
+.shots/
+power-flow-types/
+files.zip
+sketches/
+assets/AGENT_PROMPT.md
+assets/power-flow-icons/preview.html
