@@ -65,6 +65,7 @@ class EnphaseIQGateway:
                      .rstrip("/"))
         self.token = None
         self.auth_failed = False
+        self.stop_event = None  # set by the poll guard to abort a slow poll
         self.session = requests.Session()
         self.session.verify = False  # self-signed gateway cert
         # Restore a previously established session (survives restarts)
@@ -72,58 +73,84 @@ class EnphaseIQGateway:
         if saved:
             self.session.cookies.set("sessionId", saved, path="/")
 
+    def _aborted(self) -> bool:
+        return bool(self.stop_event and self.stop_event.is_set())
+
     # ---------- auth ----------
     _last_auth_fail = 0.0  # class-level lockout timestamp
 
     def _have_session(self) -> bool:
-        return bool(self.session.cookies.get("sessionId"))
+        return bool(self._get_cookie("sessionId"))
 
-    def _session_works(self) -> bool:
-        """Cheap probe: does the (persisted) session still authenticate?
-        Uses a DATA endpoint — deliberately NOT check_jwt, which resets
-        the session binding and would invalidate the very session we're
-        testing (and, with a Bearer, counts against the token's
-        rate limit)."""
+    def _get_cookie(self, name: str) -> str:
+        """Read a cookie value from the jar (handles the gateway's
+        Set-Cookie domain — a plain cookies.get() can miss it)."""
+        for c in self.session.cookies:
+            if c.name == name:
+                return c.value
+        return ""
+
+    def _session_works(self):
+        """Probe the (persisted) session against a DATA endpoint.
+        Returns True (works), False (definitively 401), or None (unknown —
+        a hang/timeout, which must NOT trigger a check_jwt: re-firing the
+        Bearer on a slow gateway is what rate-limits the token)."""
+        if self._aborted():
+            return False
         try:
             r = self.session.get(self.base + "/production.json",
-                                params={"details": 1}, timeout=10)
-            return r.status_code == 200 and self._have_session()
+                                params={"details": 1}, timeout=8)
         except Exception:
+            return None  # timeout/connection error — session state unknown
+        if r.status_code == 401:
             return False
+        if r.status_code == 200 and self._have_session():
+            return True
+        return None  # some other status — don't burn the token over it
 
     def authenticate(self, force: bool = False) -> bool:
         """Establish the sessionId cookie.
 
         Order of attempts (sparingly — the gateway rate-limits the token):
         1. If a persisted session is still accepted by the gateway, keep it
-           (no token is ever sent). This is the common case.
-        2. Otherwise present the Bearer to check_jwt, but only if no
-           foreign session is bound to the token — i.e. only when we have
-           no session of our own (or force=True after a token change).
+           (no token is ever sent). This is the common case — including
+           force=True, because a *working* session must never be
+           invalidated: check_jwt with the Bearer re-issues the session
+           and kills the previous one (one live session per token), so
+           calling it when the cookie still works is purely harmful.
+        2. Otherwise present the Bearer to check_jwt, honouring the
+           lockout (force bypasses the lockout, e.g. after a token change).
         A failed check_jwt locks the token out for _AUTH_LOCKOUT_S so we
         never hammer the gateway."""
-        if not force and self._have_session() and self._session_works():
-            # refresh the persisted copy (gateway re-issues it)
-            new = self.session.cookies.get("sessionId")
+        probe = None
+        if self._have_session():
+            probe = self._session_works()
+        if self._have_session() and probe is not False:
+            # working, OR unknown (a hang) — in both cases the cookie is
+            # the right thing to use; never burn the token over a hang
+            new = self._get_cookie("sessionId")
             if new:
                 _save_cookie("sessionId", new)
             self.token = self.cfg.get("enphase_token")
             self.auth_failed = False
-            log.debug("enphase: reusing persisted session")
+            log.debug("enphase: keeping persisted session (probe: %s)",
+                      "ok" if probe else "unknown")
             return True
         token = self.cfg.get("enphase_token")
         if not token:
             self.auth_failed = True
             log.warning("enphase: no enphase_token in config")
             return False
-        if time.time() - self._last_auth_fail < _AUTH_LOCKOUT_S:
+        if not force and time.time() - self._last_auth_fail < _AUTH_LOCKOUT_S:
             log.info("enphase: re-auth skipped (lockout, %d s remain)",
                      int(_AUTH_LOCKOUT_S - (time.time() - self._last_auth_fail)))
             return False
         try:
+            if self._aborted():
+                return {"error": "aborted"}
             r = self.session.get(self.base + "/auth/check_jwt",
                                 headers={"Authorization": "***" + token},
-                                timeout=10)
+                                timeout=8)
             if r.status_code == 200 and self._have_session():
                 self.token = token
                 self.auth_failed = False
@@ -143,11 +170,15 @@ class EnphaseIQGateway:
 
     def _get(self, path):
         """API calls use the sessionId cookie (never the Bearer — the
-        gateway resets those connections). On 401, try to re-establish the
-        session once, then retry."""
+        gateway resets those connections). On a definitive 401, try to
+        re-establish the session once, then retry. A *timeout* is NOT
+        treated as auth failure — it just means the gateway was slow;
+        re-firing check_jwt on a hang is what rate-limits the token."""
         for attempt in (1, 2):
+            if self._aborted():
+                return {"error": "aborted"}
             try:
-                r = self.session.get(self.base + path, timeout=10)
+                r = self.session.get(self.base + path, timeout=8)
             except Exception as e:
                 return {"error": f"{type(e).__name__}: {e}"}
             if r.status_code == 401 and self.token and attempt == 1:
@@ -157,8 +188,7 @@ class EnphaseIQGateway:
             try:
                 r.raise_for_status()
                 data = r.json()
-                # opportunistically refresh the persisted cookie
-                c = self.session.cookies.get("sessionId")
+                c = self._get_cookie("sessionId")
                 if c:
                     _save_cookie("sessionId", c)
                 return data
@@ -261,8 +291,18 @@ class EnphaseIQGateway:
         return snap
 
 
-def _poll_with_timeout(client: EnphaseIQGateway, timeout_s: int = 15) -> dict:
+def _poll_with_timeout(client: EnphaseIQGateway, timeout_s: int = 34) -> dict:
+    """Run one full poll in a worker thread; return {ok, snapshot, error}.
+
+    The join budget (timeout_s) must exceed the worker's worst case
+    (probe 8s + check_jwt 8s + fetch 2x8s + retry ≈ 32s), otherwise the
+    thread outlives the join and leaks — and the next job is skipped by
+    max_instances=1. stop_event lets the worker bail promptly if the
+    scheduler moves on, so a leaked thread never holds a gateway
+    connection for long."""
     result = {}
+    stop = threading.Event()
+    client.stop_event = stop
 
     def worker():
         try:
@@ -284,6 +324,8 @@ def _poll_with_timeout(client: EnphaseIQGateway, timeout_s: int = 15) -> dict:
     t.start()
     t.join(timeout_s)
     if t.is_alive():
+        # don't leak: tell the worker to abort its pending requests
+        stop.set()
         return {"ok": False, "error": f"poll timed out after {timeout_s}s"}
     return result
 

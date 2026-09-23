@@ -47,11 +47,18 @@ class PowerwallClient:
         self.token = None
         self.auth_failed = False
         self._last_auth_fail = 0.0
+        self._reauthed = False  # reset per poll: re-auth at most once per poll
+        self.stop_event = None  # set by the poll guard to abort a slow poll
         self.session = requests.Session()
         self.session.verify = False  # self-signed gateway cert
 
+    def _aborted(self) -> bool:
+        return bool(self.stop_event and self.stop_event.is_set())
+
     # ---------- auth ----------
     def authenticate(self, force: bool = False) -> bool:
+        if self._aborted():
+            return bool(self.token)
         if not force and (time.time() - self._last_auth_fail) < self._AUTH_LOCKOUT_S:
             return bool(self.token)
         payload = {"username": self.cfg.get("username", "customer")}
@@ -83,13 +90,18 @@ class PowerwallClient:
 
     def _get_or_reauth(self, path):
         try:
+            if self._aborted():
+                return {"error": "aborted"}
             r = self.session.get(self.base + path,
-                                headers=self._headers(), timeout=10)
-            if r.status_code == 401:
+                                headers=self._headers(), timeout=8)
+            if r.status_code == 401 and not self._reauthed:
+                self._reauthed = True  # at most one re-auth per poll
                 log.info("401 on %s — re-authenticating", path)
                 self.authenticate()
+                if self._aborted():
+                    return {"error": "aborted"}
                 r = self.session.get(self.base + path,
-                                    headers=self._headers(), timeout=10)
+                                    headers=self._headers(), timeout=8)
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -202,9 +214,17 @@ class PowerwallClient:
         return snap
 
 
-def _poll_with_timeout(client: PowerwallClient, timeout_s: int = 15) -> dict:
-    """Run one full poll in a worker thread; return {ok, snapshot, error}."""
+def _poll_with_timeout(client: PowerwallClient, timeout_s: int = 42) -> dict:
+    """Run one full poll in a worker thread; return {ok, snapshot, error}.
+
+    The join budget must exceed the worker's worst case (login 8s +
+    5 endpoints x 8s + one re-auth 8s ≈ 40s) or the thread leaks and the
+    next job is skipped. stop_event aborts a slow poll so a leaked
+    thread never holds a gateway connection."""
     result = {}
+    stop = threading.Event()
+    client.stop_event = stop
+    client._reauthed = False  # fresh per poll: at most one re-auth
 
     def worker():
         try:
@@ -226,6 +246,7 @@ def _poll_with_timeout(client: PowerwallClient, timeout_s: int = 15) -> dict:
     t.start()
     t.join(timeout_s)
     if t.is_alive():
+        stop.set()  # don't leak
         return {"ok": False, "error": f"poll timed out after {timeout_s}s"}
     return result
 
