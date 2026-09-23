@@ -14,6 +14,13 @@ Tesla gateway every 10 seconds (burst-tested safe) and renders:
 Dark theme, responsive (mobile: zoom + swipe-to-pan, reflowed data rows),
 click ⓘ tooltips, local API password option.
 
+![Powerwall 2 Dashboard](assets/screenshot-home.png)
+
+> *Live dashboard — KPI cards (battery SoE, battery, home, grid, solar), the
+> 4-view power-flow widget (Flow / Schematic / Summary / Sankey), history
+> charts, rolling energy summaries, and a grid-import verdict banner. All data
+> is polled from your Powerwall gateway every 10 seconds.*
+
 ## Quick start
 
 1. **Python 3.10+** (3.14 tested). Dependencies:
