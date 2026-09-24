@@ -6,6 +6,7 @@ gateway on a fixed interval (threaded timeout per cycle).
 import logging
 import os
 import socket
+import threading
 import time
 from getpass import getpass
 from werkzeug.security import check_password_hash
@@ -61,9 +62,26 @@ def _lan_ips() -> list:
     return sorted(ips)
 
 
+# Item 7: the LAN interface IPs (gethostbyname + a UDP connect) must NOT be
+# recomputed on every request (DNS/UDP on the hot path). Compute once,
+# refresh at most every 10 minutes.
+_LAN_IPS_TTL_S = 600.0
+_lan_ips_lock = threading.Lock()
+_lan_ips_cache = {"ts": 0.0, "ips": []}
+
+
+def _lan_ips_cached() -> list:
+    with _lan_ips_lock:
+        now = time.time()
+        if not _lan_ips_cache["ips"] or now - _lan_ips_cache["ts"] >= _LAN_IPS_TTL_S:
+            _lan_ips_cache["ips"] = _lan_ips()
+            _lan_ips_cache["ts"] = now
+        return _lan_ips_cache["ips"]
+
+
 def _allowed_hosts(cfg) -> set:
     hosts = {"127.0.0.1", "localhost"}
-    hosts.update(_lan_ips())
+    hosts.update(_lan_ips_cached())
     for h in (cfg.get("allowed_hosts") or []):
         h = str(h).strip().lower()
         if h:
@@ -106,7 +124,6 @@ def _security_headers(resp):
 # correct password cannot win while an IP is locked (the throttle actually
 # slows brute force). Thread-safe (Waitress runs 8 threads) and bounded
 # (at most 10,000 tracked IPs; the oldest are evicted).
-import threading
 
 _throttle = {}  # {ip: {"fails": int, "first": ts, "locked_until": ts}}
 _throttle_lock = threading.Lock()
@@ -146,8 +163,14 @@ def _security_gate():
         return None
     ip = request.remote_addr or "unknown"
     # DNS-rebinding guard: the Host header must be a known interface, no port.
-    req_host = (request.host or "").split(":")[0].lower()
-    if req_host and req_host not in _allowed_hosts(cfg):
+    # Item 7: a MISSING or EMPTY Host is a bypass of that guard — reject it
+    # with 400 (never fall through to the un-checked path).
+    raw_host = request.headers.get("Host") or ""
+    if not raw_host.strip():
+        log.warning("rejected request: missing/empty Host header from %s", ip)
+        abort(400)
+    req_host = raw_host.split(":")[0].lower()
+    if req_host not in _allowed_hosts(cfg):
         log.warning("rejected request: disallowed Host %r", req_host)
         abort(400)
     # 1) Lockout check FIRST — never evaluate the credentials while the IP is
@@ -269,6 +292,17 @@ def _validate_updatable(data: dict) -> list:
 
 # ---- state (module scope — NOT in before_request, per SQLite WAL rules) ----
 cfg = config.ensure_config()
+# Item 7: one-shot migration — if the source is enphase but enphase_gateway
+# is empty, copy gateway into it ONCE, save, and log. After this, the
+# Enphase client uses ONLY enphase_gateway (no fallback), so a Tesla
+# gateway change can never redirect the Enphase JWT.
+if cfg.get("source", "tesla") == "enphase" and not (cfg.get("enphase_gateway") or "").strip() \
+        and (cfg.get("gateway") or "").strip():
+    cfg["enphase_gateway"] = cfg["gateway"]
+    config.save(cfg)
+    log.warning("enphase_gateway was empty — one-shot migration: copied "
+                "gateway (%s) into enphase_gateway. Enphase now uses only "
+                "enphase_gateway.", cfg["enphase_gateway"])
 storage.init_db()
 storage.maybe_rollup()
 

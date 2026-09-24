@@ -62,8 +62,11 @@ def _load_cookie() -> str:
 class EnphaseIQGateway:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.base = ((cfg.get("enphase_gateway") or cfg.get("gateway") or "")
-                     .rstrip("/"))
+        # Item 7: NO fallback to cfg["gateway"]. The Enphase JWT must only
+        # ever be sent to the configured enphase_gateway, so a Tesla gateway
+        # change can never redirect it. (At startup, app.py copies
+        # gateway -> enphase_gateway ONCE if enphase_gateway is empty.)
+        self.base = (cfg.get("enphase_gateway") or "").rstrip("/")
         self.token = None
         self.auth_failed = False
         self.stop_event = None  # set by the poll guard to abort a slow poll

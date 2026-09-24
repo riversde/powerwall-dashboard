@@ -68,11 +68,21 @@ Adding a new source = one module with `poll_once()` + a name in
    ```
 
    The server binds `127.0.0.1:8771` **by default** (localhost only). To make it
-   reachable from your LAN, set `"bind_host": "0.0.0.0"` in `config.json`
-   (HTTP Basic auth still applies — see *Security* below).
+   reachable from your LAN, use the CLI:
+
+   ```
+   python app.py --set-bind-host 0.0.0.0
+   python app.py --add-allowed-host <hostname-or-ip>   # optional extra
+   ```
+
+   (HTTP Basic auth still applies — see *Security* below. `bind_host` and
+   `allowed_hosts` are intentionally **not writable via the API**; they are
+   network-level settings, so they are changed from the machine itself.)
 
    On first run the app prints a **one-time UI password** to the console.
    Use `python app.py --set-ui-password` to choose your own (min 8 chars).
+   Other CLI commands: `--set-ui-password`, `--set-bind-host`,
+   `--add-allowed-host`.
 
 3. **Open the dashboard** — `http://<host>:8771`, log in with the UI
    username (`admin` by default) + the password, then use the settings page to
@@ -100,11 +110,16 @@ Adding a new source = one module with `poll_once()` + a name in
   logged. First run prints a generated password to the console exactly once;
   set your own with `python app.py --set-ui-password` (min 8 characters).
 - **Bind address** — the server binds `127.0.0.1:8771` by default
-  (localhost only). Set `"bind_host": "0.0.0.0"` in `config.json` to listen
-  on the LAN; auth still applies either way.
+  (localhost only). Set it to `0.0.0.0` to listen on the LAN with
+  `python app.py --set-bind-host 0.0.0.0` (auth still applies either way).
+  `bind_host` is validated on load (must be `127.0.0.1`, `0.0.0.0`, or a
+  local machine IP) and is **not writable via the API**.
 - **Host allowlist** — the `Host` header must be `localhost`, `127.0.0.1`,
   a LAN IP of this machine, or an entry in `allowed_hosts` (DNS-rebinding
-  guard). Anything else gets a 400.
+  guard). A missing/empty `Host` header or any other value gets a 400.
+  `allowed_hosts` is validated on load (max 20 entries, each a valid IP or
+  hostname) and is added via `python app.py --add-allowed-host <host>` —
+  **not writable via the API**.
 - **Per-IP throttle** — 10 failed logins from one IP lock it out for 5
   minutes (`Retry-After` header set).
 - **CSRF guard** — state-changing POST routes (`/api/config`, `/api/reauth`)
@@ -170,7 +185,7 @@ authenticated tunnel in front of it — do not port-forward 8771.
 |---|---|---|---|
 | `source` | `tesla` | No | `tesla` \| `enphase` — which adapter polls |
 | `gateway` | `""` | No | Gateway base URL, `https://<ip>` (must be private/link-local) |
-| `enphase_gateway` | `""` | No | Enphase IQ Gateway URL (falls back to `gateway`) |
+| `enphase_gateway` | `""` | No | Enphase IQ Gateway URL. On startup, `gateway` is copied into it **once** if it is empty; after that the Enphase client uses **only** this key (no fallback to `gateway`), so a Tesla gateway change can never redirect the Enphase JWT |
 | `username` | `customer` | No | Tesla login username |
 | `email` | `""` | No | Tesla app account email (optional; never echoed by the API) |
 | `local_api_password` | `""` | **Yes** | Tesla sticker password (Fernet-encrypted at rest) |
@@ -180,8 +195,8 @@ authenticated tunnel in front of it — do not port-forward 8771.
 | `grid_export_credit` | `0.0` | No | ZAR per kWh exported (user: no credit) |
 | `ui_username` | `admin` | No | HTTP Basic username for the dashboard |
 | `ui_password_hash` | `""` | **Yes** | werkzeug hash (Fernet-encrypted at rest when set) |
-| `bind_host` | `127.0.0.1` | No | `0.0.0.0` to listen on the LAN (auth still applies) |
-| `allowed_hosts` | `[]` | No | Extra Host values to allow (merged with LAN IPs) |
+| `bind_host` | `127.0.0.1` | No | `0.0.0.0` to listen on the LAN (auth still applies). **Not API-writable** — set via `python app.py --set-bind-host` |
+| `allowed_hosts` | `[]` | No | Extra Host values to allow (merged with LAN IPs). **Not API-writable** — add via `python app.py --add-allowed-host` |
 | `gateway_cert_sha256` | `""` | No | Tesla TLS SHA-256 pin (TOFU on first connect) |
 | `enphase_cert_sha256` | `""` | No | Enphase TLS SHA-256 pin (TOFU on first connect) |
 
