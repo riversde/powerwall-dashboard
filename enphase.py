@@ -68,12 +68,17 @@ class EnphaseIQGateway:
         self.auth_failed = False
         self.stop_event = None  # set by the poll guard to abort a slow poll
         # Fix 4: TLS cert-fingerprint pinning (TOFU) instead of verify=False.
+        # Item 4: the pin lives in the SHARED self.cfg (the one app.py holds
+        # and saves). pin_getter reads self.cfg and save_pin writes self.cfg
+        # then config.save(self.cfg) — so an unrelated UI save can never
+        # erase the pin (the old code wrote a disk copy config.load() and
+        # left the in-memory cfg holding "").
         import certpin
         self._pin = certpin.CertPinner(
             "enphase",
-            pin_getter=lambda: (config.load() or {}).get("enphase_cert_sha256", ""),
-            save_pin=lambda fp: config.save(
-                {**config.load(), "enphase_cert_sha256": fp}))
+            pin_getter=lambda: self.cfg.get("enphase_cert_sha256", ""),
+            save_pin=lambda fp: (self.cfg.__setitem__("enphase_cert_sha256", fp),
+                                config.save(self.cfg)))
         self.session = certpin.make_pinning_session(self._pin)
         # Restore a previously established session (survives restarts)
         saved = _load_cookie()

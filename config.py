@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import os
+import threading
 
 from cryptography.fernet import Fernet
 
@@ -22,6 +23,12 @@ KEY_PATH = os.path.join(BASE_DIR, "config.key")
 KEY_DPAPI_PATH = os.path.join(BASE_DIR, "config.key.dpapi")
 
 SECRET_KEYS = ("local_api_password", "enphase_token", "ui_password_hash")
+
+# Item 4: one lock so the poller thread and the request threads can't
+# interleave a load()/save() (or the pin-getter/save_pin lambdas) in the
+# middle of a config write. RLock (not Lock) because load() may be called
+# from inside save() callers and the pin path takes it recursively.
+_config_lock = threading.RLock()
 
 
 def _restrict(path):
@@ -129,6 +136,11 @@ def _dec(f: Fernet, token: str) -> str:
 
 
 def load() -> dict:
+    with _config_lock:
+        return _load_unlocked()
+
+
+def _load_unlocked() -> dict:
     cfg = dict(DEFAULTS)
     if os.path.isfile(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -146,6 +158,11 @@ def load() -> dict:
 
 
 def save(cfg: dict) -> None:
+    with _config_lock:
+        _save_unlocked(cfg)
+
+
+def _save_unlocked(cfg: dict) -> None:
     f = _fernet()
     raw = {}
     for k, v in cfg.items():
