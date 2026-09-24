@@ -5,10 +5,13 @@ gateway on a fixed interval (threaded timeout per cycle).
 """
 import logging
 import os
+import socket
 import time
+from getpass import getpass
+from werkzeug.security import check_password_hash
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, abort, g, jsonify, render_template, request
 
 import config
 import powerwall
@@ -17,11 +20,17 @@ import storage
 # ---- logging ----
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+from logging.handlers import RotatingFileHandler
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, "powerwall.log"), encoding="utf-8"),
+        RotatingFileHandler(
+            os.path.join(LOG_DIR, "powerwall.log"),
+            maxBytes=5 * 1024 * 1024,  # 5 MB
+            backupCount=5,
+            encoding="utf-8",
+        ),
         logging.StreamHandler(),
     ],
 )
@@ -30,6 +39,186 @@ log = logging.getLogger("app")
 app = Flask(__name__)
 # Re-read templates on change so edits are never served stale across restarts.
 app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+
+def _lan_ips() -> list:
+    """Best-effort list of this machine's LAN IPv4 addresses."""
+    ips = set()
+    try:
+        ips.add(socket.gethostbyname(socket.gethostname()))
+    except Exception:
+        pass
+    try:
+        # the address the OS would use to reach the public internet
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+        finally:
+            s.close()
+    except Exception:
+        pass
+    return sorted(ips)
+
+
+def _allowed_hosts(cfg) -> set:
+    hosts = {"127.0.0.1", "localhost"}
+    hosts.update(_lan_ips())
+    for h in (cfg.get("allowed_hosts") or []):
+        h = str(h).strip().lower()
+        if h:
+            hosts.add(h)
+    return hosts
+
+
+@app.before_request
+def _csp_nonce_request():
+    # Per-request CSP nonce (shared by the inline <script>/<style> and the header).
+    import base64, secrets as _s
+    g.csp_nonce = base64.b64encode(_s.token_bytes(16)).decode("ascii")
+
+
+@app.after_request
+def _security_headers(resp):
+    nonce = getattr(g, "csp_nonce", "")
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}'; "
+        f"style-src 'self' 'nonce-{nonce}' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self'; "
+        "connect-src 'self'; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    )
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
+
+
+@app.before_request
+def _security_gate():
+    # /health is the one route that must work with no auth (health checks).
+    if request.path == "/health":
+        return None
+    # DNS-rebinding guard: the Host header must be a known interface, no port.
+    req_host = (request.host or "").split(":")[0].lower()
+    if req_host and req_host not in _allowed_hosts(cfg):
+        log.warning("rejected request: disallowed Host %r", req_host)
+        abort(400)
+    # HTTP Basic auth (constant-time check via werkzeug); per-IP throttle.
+    auth = request.authorization
+    if auth and auth.username == cfg.get("ui_username", "admin") and check_password_hash(
+            cfg.get("ui_password_hash") or "", auth.password or ""):
+        _throttle.pop(request.remote_addr, None)
+        return None
+    ip = request.remote_addr or "unknown"
+    rec = _throttle.get(ip)
+    locked_until, fails = (rec if rec else (0.0, 0))
+    if fails >= 10 and time.time() < locked_until:
+        resp = make_response_401()
+        resp.headers["Retry-After"] = str(int(locked_until - time.time()))
+        return resp
+    if auth is not None:  # a credential attempt that failed -> count it
+        fails += 1
+        _throttle[ip] = (time.time() + 300 if fails >= 10 else locked_until, fails)
+    return make_response_401()
+
+
+def make_response_401():
+    from flask import Response
+    r = Response("Authentication required.", status=401, mimetype="text/plain")
+    r.headers["WWW-Authenticate"] = 'Basic realm="powerwall-dashboard"'
+    return r
+
+
+# In-memory failed-login throttle: {ip: (locked_until, fails)}.
+_throttle = {}
+
+
+# ---- CSRF guard for state-changing (POST) routes ----
+CSRF_HEADER = "X-Requested-With"
+CSRF_VALUE = "powerwall-dashboard"
+
+
+def _csrf_check():
+    """Reject non-browser/SPA cross-origin mutations. Returns an error response
+    or None. Order: missing custom header -> 403; wrong content-type -> 400;
+    Origin present but mismatched -> 403."""
+    if request.headers.get(CSRF_HEADER) != CSRF_VALUE:
+        return Response("Missing %s header." % CSRF_HEADER, status=403,
+                       mimetype="text/plain")
+    if not (request.content_type or "").startswith("application/json"):
+        return Response("Content-Type must be application/json.", status=400,
+                       mimetype="text/plain")
+    origin = request.headers.get("Origin")
+    if origin:
+        from urllib.parse import urlparse
+        try:
+            ohost = urlparse(origin).hostname or ""
+        except Exception:
+            ohost = ""
+        req_host = (request.host or "").split(":")[0].lower()
+        if ohost and ohost.lower() != req_host:
+            return Response("Origin does not match request host.", status=403,
+                           mimetype="text/plain")
+    return None
+
+# ---- Fix 3: gateway URL + field validation ----
+import ipaddress
+from urllib.parse import urlparse
+
+
+def _valid_gateway(value) -> bool:
+    """An https:// URL whose host is a private/link-local IP (not loopback,
+    not multicast) or a hostname ending in .local. No path, query or userinfo."""
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    try:
+        p = urlparse(v)
+    except Exception:
+        return False
+    if p.scheme != "https":
+        return False
+    host = (p.hostname or "").lower()
+    if not host or p.query or p.path or p.fragment:
+        return False
+    if p.username is not None:  # userinfo (https://user:pass@host)
+        return False
+    if host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.is_loopback or ip.is_multicast or not ip.is_private:
+        return False
+    return True
+
+
+def _validate_updatable(data: dict) -> list:
+    """Type/whitelist checks; returns a list of error strings (empty = OK).
+    Unknown keys are silently ignored by the caller."""
+    errs = []
+    if "source" in data and data["source"] not in ("tesla", "enphase"):
+        errs.append("source must be 'tesla' or 'enphase'")
+    if "poll_interval_seconds" in data:
+        v = data["poll_interval_seconds"]
+        if not isinstance(v, int) or isinstance(v, bool) or not (10 <= v <= 3600):
+            errs.append("poll_interval_seconds must be an int 10-3600")
+    for k in ("grid_import_rate", "grid_export_credit"):
+        if k in data:
+            v = data[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0 <= float(v) <= 100):
+                errs.append(f"{k} must be a number 0-100")
+    for k in ("username", "email"):
+        if k in data:
+            v = data[k]
+            if not isinstance(v, str) or len(v) > 128:
+                errs.append(f"{k} must be a string of 128 chars or fewer")
+    return errs
+
 
 # ---- state (module scope — NOT in before_request, per SQLite WAL rules) ----
 cfg = config.ensure_config()
@@ -93,7 +282,7 @@ def start_polling():
 # ---- API routes ----
 @app.route("/")
 def index():
-    return render_template("dashboard.html", port=FLASK_PORT)
+    return render_template("dashboard.html", port=FLASK_PORT, nonce=g.csp_nonce)
 
 
 # energy cache (recomputed max once/60s — the page polls status every 5s)
@@ -144,7 +333,13 @@ def api_energy():
     period = request.args.get("period", "today")
     now = dt.datetime.now()
     import time as _t
-    n = int(request.args.get("n", 7)) if "n_days" in period else 7
+    n = 7
+    if "n_days" in period:
+        try:
+            n = int(request.args.get("n", 7))
+        except (ValueError, TypeError):
+            return jsonify({"error": "invalid n (must be an integer)"}), 400
+        n = max(1, min(3650, n))  # clamp to 1–3650
     start = end = None
     if period == "today":
         start = dt.datetime(now.year, now.month, now.day).timestamp()
@@ -202,9 +397,37 @@ def api_config_get():
 def api_config_set():
     """Update config — single storage backend (config.save) for all writes."""
     global cfg, client, poll_mod
+    err = _csrf_check()
+    if err is not None:
+        return err
     data = request.get_json(silent=True) or {}
     updatable = ("gateway", "enphase_gateway", "username", "email", "source",
-                "poll_interval_seconds", "grid_import_rate", "grid_export_credit")
+                "poll_interval_seconds", "grid_import_rate", "grid_export_credit",
+                "bind_host", "allowed_hosts")
+
+    # ---- Fix 3: validate everything BEFORE writing anything ----
+    errs = _validate_updatable(data)
+    if data.get("gateway") not in (None, "") and not _valid_gateway(data["gateway"]):
+        errs.append("gateway must be an https:// private-IP or *.local URL (no path/query/userinfo)")
+    if data.get("enphase_gateway") not in (None, "") and not _valid_gateway(data["enphase_gateway"]):
+        errs.append("enphase_gateway must be an https:// private-IP or *.local URL (no path/query/userinfo)")
+    if errs:
+        return jsonify(ok=False, errors=errs), 400
+
+    # Changing a host requires the matching secret in the SAME request —
+    # otherwise the saved secret could be silently pointed at a new host.
+    gw_changed = (data.get("gateway") not in (None, "")
+                 and data.get("gateway") != cfg.get("gateway"))
+    egw_changed = (data.get("enphase_gateway") not in (None, "")
+                  and data.get("enphase_gateway") != cfg.get("enphase_gateway"))
+    if gw_changed and not data.get("local_api_password"):
+        return jsonify(ok=False, error="changing gateway requires "
+                                       "local_api_password in the same request"), 400
+    if egw_changed and not data.get("enphase_token"):
+        return jsonify(ok=False, error="changing enphase_gateway requires "
+                                       "enphase_token in the same request"), 400
+
+    # Apply validated fields (whitelist; unknown keys are ignored).
     for k in updatable:
         if k in data and data[k] not in (None, ""):
             cfg[k] = data[k]
@@ -212,13 +435,20 @@ def api_config_set():
         cfg["local_api_password"] = data["local_api_password"]
     if data.get("enphase_token"):
         cfg["enphase_token"] = data["enphase_token"]
-    config.save(cfg)  # same backend as reads (config.load/save)
-    # source changed? rebuild the client for the new system
-    new_mod, new_client = build_source(cfg)
-    if type(new_client) is not type(client):
+    # Fix 4: changing a host clears that source's TLS cert pin (the new host has
+    # a different certificate; the old pin would now block all requests).
+    if gw_changed:
+        cfg["gateway_cert_sha256"] = ""
+    if egw_changed:
+        cfg["enphase_cert_sha256"] = ""
+    config.save(cfg)
+    # Rebuild the client on a source OR gateway change (a gateway change
+    # used to only take effect after a restart).
+    if ("source" in data) or gw_changed or egw_changed:
+        new_mod, new_client = build_source(cfg)
         client = new_client
         poll_mod = new_mod
-        log.info("source switched — rebuilt client: %s", type(client).__name__)
+        log.info("rebuilt client: %s", type(client).__name__)
     # pick up new interval on the fly
     if "poll_interval_seconds" in data:
         interval = max(int(cfg["poll_interval_seconds"]), 10)
@@ -228,10 +458,9 @@ def api_config_set():
                                         seconds=interval)
             except Exception:
                 log.exception("reschedule failed")
-    # re-auth immediately after a credential/source change
+    # re-auth immediately after a credential/source/gateway change
     if (data.get("local_api_password") or data.get("enphase_token")
-            or "source" in data or "gateway" in data
-            or "enphase_gateway" in data):
+            or "source" in data or gw_changed or egw_changed):
         client.auth_failed = False
         client.token = None
         # a new token/source is a fresh start — clear the class-level
@@ -239,14 +468,23 @@ def api_config_set():
         # block the new token's first attempt)
         type(client)._last_auth_fail = 0.0
         client.authenticate(force=True)
-    return jsonify({"ok": True, "config": {k: v for k, v in cfg.items()
-                                          if k not in ("local_api_password",
-                                                       "enphase_token")},
+    # Mirror the GET endpoint: never echo secrets (incl. email) in the
+    # confirmation; expose has_* flags instead.
+    public = {k: v for k, v in cfg.items()
+              if k not in ("local_api_password", "enphase_token", "email")}
+    public["has_password"] = bool(cfg.get("local_api_password"))
+    public["has_enphase_token"] = bool(cfg.get("enphase_token"))
+    public["has_email"] = bool(cfg.get("email"))
+    return jsonify({"ok": True, "config": public,
                    "source": cfg.get("source")})
 
 
 @app.route("/api/reauth", methods=["POST"])
 def api_reauth():
+    err = _csrf_check()
+    if err is not None:
+        return err
+    request.get_json(silent=True)  # require a JSON body (may be {})
     client.auth_failed = False
     client.token = None
     ok = client.authenticate(force=True)
@@ -261,16 +499,43 @@ def health():
                    if storage.latest_snapshot else None})
 
 
-# ---- main ----
+# ---- first-run + main ----
+def _first_run_banner():
+    """If no UI password hash exists yet, generate one, persist it, and print the
+    plaintext ONCE to the console (not the log file)."""
+    global cfg
+    if not cfg.get("ui_password_hash"):
+        import secrets
+        pw = secrets.token_urlsafe(15)  # 20-char URL-safe password
+        cfg["ui_password_hash"] = config.hash_password(pw)
+        config.save(cfg)
+        print("\n" + "=" * 62, flush=True)
+        print("  POWERWALL DASHBOARD — first run (console only, not in logs)", flush=True)
+        print(f"  UI username : {cfg.get('ui_username', 'admin')}", flush=True)
+        print(f"  UI password : {pw}", flush=True)
+        print("  The dashboard now requires HTTP Basic auth. Save this password;", flush=True)
+        print("  reset it later with:  python app.py --set-ui-password", flush=True)
+        print("=" * 62 + "\n", flush=True)
+
+
 if __name__ == "__main__":
+    import sys
+    if "--set-ui-password" in sys.argv:
+        new = getpass("New UI password (input hidden): ")
+        if len(new) < 8:
+            print("Rejected: password must be at least 8 characters.", file=sys.stderr)
+            sys.exit(1)
+        config.set_ui_password(new)
+        sys.exit(0)
+    _first_run_banner()
     # one poll immediately so the page isn't empty on first load
     _poll_cycle()
     start_polling()
+    host = (cfg.get("bind_host") or "127.0.0.1").strip() or "127.0.0.1"
     try:
         from waitress import serve
-        log.info("serving on %s:%s", FLASK_HOST, FLASK_PORT)
-        serve(app, host=FLASK_HOST, port=FLASK_PORT,
-              threads=8, recv_bytes=65536)
+        log.info("serving on %s:%s", host, FLASK_PORT)
+        serve(app, host=host, port=FLASK_PORT, threads=8, recv_bytes=65536)
     except ImportError:
         log.warning("waitress missing — falling back to dev server")
-        app.run(host=FLASK_HOST, port=FLASK_PORT)
+        app.run(host=host, port=FLASK_PORT)

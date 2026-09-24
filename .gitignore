@@ -1,6 +1,7 @@
 # secrets — never commit
 config.json
 config.key
+config.key.dpapi
 
 # runtime data
 *.db

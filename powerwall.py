@@ -1,7 +1,7 @@
 """Powerwall Gateway client + poller.
 
 Auth: POST {gateway}/api/login/Basic  {"username": "customer", "password": ...}
-     -> {"token": "..."} used as Authorization: Bearer <token>.
+     -> {"token": "..."} used as Authorization: Bearer <token>
 Data: /api/system_status/soe, /api/meters/aggregates, /api/system_status,
       /api/sitemaster, /api/operation  (all with the same Bearer token).
 
@@ -18,6 +18,7 @@ import time
 
 import requests
 import urllib3
+import config
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -49,8 +50,14 @@ class PowerwallClient:
         self._last_auth_fail = 0.0
         self._reauthed = False  # reset per poll: re-auth at most once per poll
         self.stop_event = None  # set by the poll guard to abort a slow poll
-        self.session = requests.Session()
-        self.session.verify = False  # self-signed gateway cert
+        # Fix 4: TLS cert-fingerprint pinning (TOFU) instead of verify=False.
+        import certpin
+        self._pin = certpin.CertPinner(
+            "tesla",
+            pin_getter=lambda: (config.load() or {}).get("gateway_cert_sha256", ""),
+            save_pin=lambda fp: config.save(
+                {**config.load(), "gateway_cert_sha256": fp}))
+        self.session = certpin.make_pinning_session(self._pin)
 
     def _aborted(self) -> bool:
         return bool(self.stop_event and self.stop_event.is_set())
@@ -76,8 +83,10 @@ class PowerwallClient:
                 log.info("authenticated, token acquired")
             else:
                 self._last_auth_fail = time.time()
-                log.warning("authenticate: no token in response (HTTP %s): %s — "
-                           "%d s lockout", r.status_code, data, self._AUTH_LOCKOUT_S)
+                log.warning("authenticate: no token in response (HTTP %s): keys=%s — "
+                           "%d s lockout", r.status_code,
+                           sorted(data.keys()) if isinstance(data, dict) else "non-dict",
+                           self._AUTH_LOCKOUT_S)
             return bool(self.token)
         except Exception as e:
             self.auth_failed = True
@@ -86,7 +95,7 @@ class PowerwallClient:
             return False
 
     def _headers(self):
-        return {"Authorization": "***" + self.token} if self.token else {}
+        return {"Authorization": "Bearer " + self.token} if self.token else {}
 
     def _get_or_reauth(self, path):
         try:
