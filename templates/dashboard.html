@@ -701,17 +701,16 @@ body { margin: 0; background: var(--pf-ground); color: var(--pf-text); font-fami
         </div>
       </div>
 
-    </div>
-      <!-- ================= VIEW S: EXISTING SANKEY (unchanged, 4th view) ================= -->
+      <!-- ================= VIEW S: SANKEY (4th view, inside the stage like the others) ================= -->
       <div class="pf-view" id="view-sankey" hidden>
-        <svg id="flow" viewBox="0 0 1000 440" style="position:absolute;left:0;top:60px;width:100%;height:auto">
+        <svg id="flow" class="abs" width="1280" height="760" viewBox="0 0 1280 760" style="left:0;top:0">
           <!-- links (behind nodes) -->
-          <path class="link-base" id="path-solar"   d="M 170 70  C 300 70, 340 70, 460 150"/>
-          <path class="link-hot"   id="hot-solar"   d="M 170 70  C 300 70, 340 70, 460 150" stroke="var(--solar)"/>
-          <path class="link-base" id="path-grid"   d="M 170 330 C 300 330, 340 250, 460 220"/>
-          <path class="link-hot"   id="hot-grid"    d="M 170 330 C 300 330, 340 250, 460 220" stroke="var(--blue)"/>
-          <path class="link-base" id="path-batt"   d="M 500 380 C 520 360, 560 320, 600 260"/>
-          <path class="link-hot"   id="hot-batt"    d="M 500 380 C 520 360, 560 320, 600 260" stroke="var(--orange)"/>
+          <path class="link-base" id="path-solar"   d="M 280 175 C 500 175, 700 210, 920 210"/>
+          <path class="link-hot"   id="hot-solar"   d="M 280 175 C 500 175, 700 210, 920 210" stroke="var(--solar)"/>
+          <path class="link-base" id="path-grid"   d="M 280 485 C 520 485, 700 240, 920 210"/>
+          <path class="link-hot"   id="hot-grid"    d="M 280 485 C 520 485, 700 240, 920 210" stroke="var(--blue)"/>
+          <path class="link-base" id="path-batt"   d="M 720 435 C 800 435, 850 230, 920 210"/>
+          <path class="link-hot"   id="hot-batt"    d="M 720 435 C 800 435, 850 230, 920 210" stroke="var(--orange)"/>
           <!-- particles -->
           <circle class="particle" id="p-solar-0" r="6" fill="var(--solar)"/>
           <circle class="particle" id="p-solar-1" r="4" fill="var(--solar)"/>
@@ -719,39 +718,40 @@ body { margin: 0; background: var(--pf-ground); color: var(--pf-text); font-fami
           <circle class="particle" id="p-grid-1"  r="4" fill="var(--blue)"/>
           <circle class="particle" id="p-batt-0"  r="6" fill="var(--orange)"/>
           <circle class="particle" id="p-batt-1"  r="4" fill="var(--orange)"/>
-          <!-- nodes -->
+          <!-- nodes: 2 sources (left) → battery (mid) / home (right), within y 90-620 safe zone -->
           <g data-tip="<b>Solar</b><br>PV generation. Flows: home first → battery charge → grid export.">
-            <rect class="node-box" x="20" y="30" width="150" height="80"/>
-            <text class="node-title" x="38" y="56">SOLAR</text>
-            <text class="node-val" id="n-solar" x="38" y="90">— kW</text>
-            <text class="node-sub" id="n-solar-sub" x="38" y="104">today — kWh</text>
-            <g class="flow-info"><circle cx="166" cy="38" r="13"/><text x="166" y="44" text-anchor="middle" font-size="17">i</text></g>
+            <rect class="node-box" x="80" y="120" width="200" height="110"/>
+            <text class="node-title" x="100" y="152">SOLAR</text>
+            <text class="node-val" id="n-solar" x="100" y="184">— kW</text>
+            <text class="node-sub" id="n-solar-sub" x="100" y="204">today — kWh</text>
+            <g class="flow-info"><circle cx="262" cy="138" r="13"/><text x="262" y="144" text-anchor="middle" font-size="17">i</text></g>
           </g>
           <g data-tip="<b>Grid</b><br>Utility connection. Import (buying) shown red-tinted; export (surplus) green-tinted. Today = import vs export.">
-            <rect class="node-box" x="20" y="290" width="150" height="80"/>
-            <text class="node-title" x="38" y="316">GRID</text>
-            <text class="node-val" id="n-grid" x="38" y="350">— kW</text>
-            <text class="node-sub" id="n-grid-sub" x="38" y="364">importing</text>
-            <g class="flow-info"><circle cx="166" cy="298" r="13"/><text x="166" y="304" text-anchor="middle" font-size="17">i</text></g>
+            <rect class="node-box" x="80" y="430" width="200" height="110"/>
+            <text class="node-title" x="100" y="462">GRID</text>
+            <text class="node-val" id="n-grid" x="100" y="494">— kW</text>
+            <text class="node-sub" id="n-grid-sub" x="100" y="514">importing</text>
+            <g class="flow-info"><circle cx="262" cy="448" r="13"/><text x="262" y="454" text-anchor="middle" font-size="17">i</text></g>
           </g>
           <g data-tip="<b>Battery</b><br>Powerwall pack. Discharging = feeding the home; charging = storing energy. Today = charged / discharged.">
-            <rect class="node-box" x="380" y="380" width="220" height="52"/>
-            <text class="node-title" x="398" y="404">BATTERY</text>
-            <text class="node-val" id="n-batt" x="398" y="424" font-size="16">— kW</text>
-            <text class="node-sub" id="n-batt-sub" x="510" y="424">—</text>
-            <g class="flow-info"><circle cx="596" cy="386" r="13"/><text x="596" y="392" text-anchor="middle" font-size="17">i</text></g>
+            <rect class="node-box" x="520" y="380" width="200" height="110"/>
+            <text class="node-title" x="540" y="412">BATTERY</text>
+            <text class="node-val" id="n-batt" x="540" y="444">— kW</text>
+            <text class="node-sub" id="n-batt-sub" x="540" y="464">—</text>
+            <g class="flow-info"><circle cx="702" cy="398" r="13"/><text x="702" y="404" text-anchor="middle" font-size="17">i</text></g>
           </g>
           <g data-tip="<b>Home</b><br>Total consumption of your house. Supplied by solar, battery and grid in order of preference.">
-            <rect class="node-box" x="460" y="150" width="200" height="110"/>
-            <text class="node-title" x="480" y="182">HOME</text>
-            <text class="node-val" id="n-home" x="480" y="216">— kW</text>
-            <text class="node-sub" id="n-home-sub" x="480" y="238">today — kWh</text>
-            <g class="flow-info"><circle cx="656" cy="156" r="13"/><text x="656" y="162" text-anchor="middle" font-size="17">i</text></g>
+            <rect class="node-box" x="920" y="140" width="220" height="140"/>
+            <text class="node-title" x="940" y="172">HOME</text>
+            <text class="node-val" id="n-home" x="940" y="212">— kW</text>
+            <text class="node-sub" id="n-home-sub" x="940" y="232">today — kWh</text>
+            <g class="flow-info"><circle cx="1122" cy="158" r="13"/><text x="1122" y="164" text-anchor="middle" font-size="17">i</text></g>
           </g>
-          <!-- net badge near grid -->
-          <text id="flow-net" x="980" y="54" text-anchor="end" font-size="14" font-weight="700" fill="var(--muted)">—</text>
+          <!-- net badge — clear bottom-right corner, no node overlap -->
+          <text id="flow-net" x="1220" y="580" text-anchor="end" font-size="14" font-weight="700" fill="var(--muted)">—</text>
         </svg>
       </div>
+    </div>
   </div>
   <div class="pf-pan-hint" id="pf-pan-hint">⟷ swipe to pan</div>
   <p class="pf-error" id="pf-error" role="status"></p>
@@ -860,12 +860,12 @@ const flow = {
   batt:  {path:$('path-batt'),  parts:[$('p-batt-0'),$('p-batt-1')],  phase:0, dir:1, speed:0, active:false},
 };
 function fitFlow(){
-  // On mobile, zoom the viewBox into the drawn region (x 10-700) so the
-  // diagram renders ~40% larger; on desktop use the full canvas.
+  // The stage is 1280×760 (shared with the other three views). On mobile,
+  // crop the dead space right of x=1040 so the diagram renders larger.
   const mobile = innerWidth < 700;
-  $('flow').setAttribute('viewBox', mobile ? '10 20 690 420' : '0 0 1000 440');
-  $('flow-net').setAttribute('x', mobile ? 685 : 980);
-  $('flow-net').setAttribute('y', mobile ? 48 : 54);
+  $('flow').setAttribute('viewBox', mobile ? '0 0 1040 760' : '0 0 1280 760');
+  $('flow-net').setAttribute('x', mobile ? 1020 : 1250);
+  $('flow-net').setAttribute('y', 580);
   $('flow-net').setAttribute('font-size', mobile ? 15 : 14);
   for(const k in flow){ flow[k].len = flow[k].path.getTotalLength(); }
 }
