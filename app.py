@@ -468,9 +468,14 @@ def api_config_set():
         # block the new token's first attempt)
         type(client)._last_auth_fail = 0.0
         client.authenticate(force=True)
-    return jsonify({"ok": True, "config": {k: v for k, v in cfg.items()
-                                          if k not in ("local_api_password",
-                                                       "enphase_token")},
+    # Mirror the GET endpoint: never echo secrets (incl. email) in the
+    # confirmation; expose has_* flags instead.
+    public = {k: v for k, v in cfg.items()
+              if k not in ("local_api_password", "enphase_token", "email")}
+    public["has_password"] = bool(cfg.get("local_api_password"))
+    public["has_enphase_token"] = bool(cfg.get("enphase_token"))
+    public["has_email"] = bool(cfg.get("email"))
+    return jsonify({"ok": True, "config": public,
                    "source": cfg.get("source")})
 
 
