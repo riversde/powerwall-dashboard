@@ -8,9 +8,12 @@ pywin32 is unavailable) it falls back to the plaintext config.key and logs a
 warning. Where the platform allows, config.json and the key file are chmod 0600.
 """
 import base64
+import ipaddress
 import json
 import logging
 import os
+import re
+import socket
 import threading
 
 from cryptography.fernet import Fernet
@@ -154,6 +157,119 @@ def _load_unlocked() -> dict:
                     cfg[k] = ""
             else:
                 cfg[k] = v
+    _validate_network_keys(cfg)
+    return cfg
+
+
+# ---- Item 6: validate bind_host / allowed_hosts (load-time + CLI) ----
+_ALLOWED_HOST_RE = re.compile(r"^[a-z0-9.-]{1,253}$")
+_ALLOWED_HOSTS_MAX = 20
+
+
+def _machine_ips() -> set:
+    """IPv4 addresses assigned to this machine (best effort)."""
+    ips = set()
+    try:
+        ips.add(socket.gethostbyname(socket.gethostname()))
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+        finally:
+            s.close()
+    except Exception:
+        pass
+    return ips
+
+
+def _is_valid_allowed_host(h: str) -> bool:
+    """A valid entry is a valid IP (v4 or v6) or a hostname matching
+    ^[a-z0-9.-]{1,253}$ (lowercased; no brackets/schemes/ports)."""
+    h = h.strip().lower()
+    if not h:
+        return False
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return bool(_ALLOWED_HOST_RE.match(h))
+
+
+def _validate_network_keys(cfg: dict) -> None:
+    """Sanitise the two network keys that are NOT API-writable.
+    Called on load (and by the CLI setters). Invalid values are ignored
+    with a WARNING (never crash, never persist)."""
+    # allowed_hosts: a list of <= 20 valid strings, else ignore + WARNING
+    raw = cfg.get("allowed_hosts")
+    if raw is not None:
+        if not isinstance(raw, list):
+            log.warning("config: allowed_hosts is %s, not a list — ignoring "
+                       "(use config.json / the CLI to set it)", type(raw).__name__)
+            cfg["allowed_hosts"] = []
+        else:
+            cleaned = []
+            for h in raw:
+                hs = str(h).strip().lower()
+                if not _is_valid_allowed_host(hs):
+                    log.warning("config: allowed_hosts entry %r is not a valid "
+                               "IP or hostname — ignored", h)
+                    continue
+                if hs not in cleaned:
+                    cleaned.append(hs)
+            if len(cleaned) > _ALLOWED_HOSTS_MAX:
+                log.warning("config: allowed_hosts has %d entries (max %d); "
+                           "truncating", len(cleaned), _ALLOWED_HOSTS_MAX)
+                cleaned = cleaned[:_ALLOWED_HOSTS_MAX]
+            if cleaned != raw:
+                cfg["allowed_hosts"] = cleaned
+    # bind_host: must be 127.0.0.1, 0.0.0.0, or an IP assigned to this
+    # machine; otherwise fall back to 127.0.0.1 with a WARNING.
+    bh = (cfg.get("bind_host") or "").strip()
+    if bh not in ("127.0.0.1", "0.0.0.0"):
+        if bh and _is_valid_allowed_host(bh) and bh in _machine_ips():
+            cfg["bind_host"] = bh
+        elif bh:
+            log.warning("config: bind_host %r is not 127.0.0.1, 0.0.0.0 or a "
+                       "local machine IP — falling back to 127.0.0.1", bh)
+            cfg["bind_host"] = "127.0.0.1"
+        else:
+            cfg["bind_host"] = "127.0.0.1"
+
+
+def set_bind_host(value: str) -> dict:
+    """CLI: set bind_host, validated. Raises ValueError on an invalid value."""
+    value = value.strip()
+    if value not in ("127.0.0.1", "0.0.0.0"):
+        if not (value and _is_valid_allowed_host(value) and value in _machine_ips()):
+            raise ValueError("bind_host must be 127.0.0.1, 0.0.0.0, or an IP "
+                            "assigned to this machine")
+    cfg = load()
+    cfg["bind_host"] = value
+    save(cfg)
+    print(f"bind_host set to {value}", flush=True)
+    return cfg
+
+
+def add_allowed_host(host: str) -> dict:
+    """CLI: append a validated host to allowed_hosts (dedup, <= 20)."""
+    h = host.strip().lower()
+    if not _is_valid_allowed_host(h):
+        raise ValueError("allowed host must be a valid IP or a hostname "
+                         "matching ^[a-z0-9.-]{1,253}$")
+    cfg = load()
+    cur = cfg.get("allowed_hosts") or []
+    cur = [str(x).strip().lower() for x in cur if _is_valid_allowed_host(str(x).strip().lower())]
+    if h in cur:
+        print(f"allowed host {h} already present", flush=True)
+    else:
+        cur.append(h)
+        cur = cur[:_ALLOWED_HOSTS_MAX]
+        cfg["allowed_hosts"] = cur
+        save(cfg)
+        print(f"allowed host {h} added", flush=True)
     return cfg
 
 

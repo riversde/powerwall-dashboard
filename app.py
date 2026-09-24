@@ -464,9 +464,20 @@ def api_config_set():
     if err is not None:
         return err
     data = request.get_json(silent=True) or {}
+    # Item 6: bind_host / allowed_hosts are NOT API-writable (they are
+    # network-level keys — a remote writer must not be able to expose the
+    # server to the world or open the Host gate). They are edited in
+    # config.json or via the CLI:
+    #   python app.py --set-bind-host <ip>
+    #   python app.py --add-allowed-host <host>
+    # (both validated; see config.set_bind_host / add_allowed_host).
+    for k in ("bind_host", "allowed_hosts"):
+        if k in data and data[k] not in (None, ""):
+            return jsonify(ok=False, error=f"{k} is not API-writable; "
+                "edit config.json or use the CLI "
+                f"(python app.py --set-bind-host / --add-allowed-host)"), 400
     updatable = ("gateway", "enphase_gateway", "username", "email", "source",
-                "poll_interval_seconds", "grid_import_rate", "grid_export_credit",
-                "bind_host", "allowed_hosts")
+                "poll_interval_seconds", "grid_import_rate", "grid_export_credit")
 
     # ---- Fix 3: validate everything BEFORE writing anything ----
     errs = _validate_updatable(data)
@@ -587,6 +598,35 @@ if __name__ == "__main__":
             sys.exit(1)
         config.set_ui_password(new)
         sys.exit(0)
+
+    # Item 6 CLI: network keys are set from the command line (validated),
+    # never via the API.
+    def _arg_value(name):
+        if name in sys.argv:
+            i = sys.argv.index(name)
+            if i + 1 < len(sys.argv):
+                return sys.argv[i + 1]
+            print(f"Missing value for {name}", file=sys.stderr)
+            sys.exit(2)
+        return None
+
+    val = _arg_value("--set-bind-host")
+    if val is not None:
+        try:
+            config.set_bind_host(val)
+        except ValueError as e:
+            print(f"Rejected: {e}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+    val = _arg_value("--add-allowed-host")
+    if val is not None:
+        try:
+            config.add_allowed_host(val)
+        except ValueError as e:
+            print(f"Rejected: {e}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+
     _first_run_banner()
     # one poll immediately so the page isn't empty on first load
     _poll_cycle()
