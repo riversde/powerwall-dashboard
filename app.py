@@ -398,6 +398,12 @@ def api_config_set():
         cfg["local_api_password"] = data["local_api_password"]
     if data.get("enphase_token"):
         cfg["enphase_token"] = data["enphase_token"]
+    # Fix 4: changing a host clears that source's TLS cert pin (the new host has
+    # a different certificate; the old pin would now block all requests).
+    if gw_changed:
+        cfg["gateway_cert_sha256"] = ""
+    if egw_changed:
+        cfg["enphase_cert_sha256"] = ""
     config.save(cfg)
     # Rebuild the client on a source OR gateway change (a gateway change
     # used to only take effect after a restart).

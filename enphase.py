@@ -30,6 +30,7 @@ import time
 
 import requests
 import urllib3
+import config
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -66,8 +67,14 @@ class EnphaseIQGateway:
         self.token = None
         self.auth_failed = False
         self.stop_event = None  # set by the poll guard to abort a slow poll
-        self.session = requests.Session()
-        self.session.verify = False  # self-signed gateway cert
+        # Fix 4: TLS cert-fingerprint pinning (TOFU) instead of verify=False.
+        import certpin
+        self._pin = certpin.CertPinner(
+            "enphase",
+            pin_getter=lambda: (config.load() or {}).get("enphase_cert_sha256", ""),
+            save_pin=lambda fp: config.save(
+                {**config.load(), "enphase_cert_sha256": fp}))
+        self.session = certpin.make_pinning_session(self._pin)
         # Restore a previously established session (survives restarts)
         saved = _load_cookie()
         if saved:

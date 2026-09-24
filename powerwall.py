@@ -18,6 +18,7 @@ import time
 
 import requests
 import urllib3
+import config
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -49,8 +50,14 @@ class PowerwallClient:
         self._last_auth_fail = 0.0
         self._reauthed = False  # reset per poll: re-auth at most once per poll
         self.stop_event = None  # set by the poll guard to abort a slow poll
-        self.session = requests.Session()
-        self.session.verify = False  # self-signed gateway cert
+        # Fix 4: TLS cert-fingerprint pinning (TOFU) instead of verify=False.
+        import certpin
+        self._pin = certpin.CertPinner(
+            "tesla",
+            pin_getter=lambda: (config.load() or {}).get("gateway_cert_sha256", ""),
+            save_pin=lambda fp: config.save(
+                {**config.load(), "gateway_cert_sha256": fp}))
+        self.session = certpin.make_pinning_session(self._pin)
 
     def _aborted(self) -> bool:
         return bool(self.stop_event and self.stop_event.is_set())
