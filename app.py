@@ -100,32 +100,79 @@ def _security_headers(resp):
     return resp
 
 
+# ---- failed-login throttle (per-IP sliding window) ----
+# 10 failed credential attempts within a 10-minute window -> locked out for
+# 5 minutes. The lockout is checked BEFORE the credentials are evaluated, so a
+# correct password cannot win while an IP is locked (the throttle actually
+# slows brute force). Thread-safe (Waitress runs 8 threads) and bounded
+# (at most 10,000 tracked IPs; the oldest are evicted).
+import threading
+
+_throttle = {}  # {ip: {"fails": int, "first": ts, "locked_until": ts}}
+_throttle_lock = threading.Lock()
+_THR_MAX_IPS = 10_000
+_THR_WINDOW_S = 600   # 10 minutes
+_THR_MAX_FAILS = 10
+_THR_LOCK_S = 300     # 5 minutes
+
+
+def _record_failure(ip: str, now: float) -> bool:
+    """Record one failed credential attempt. Returns True if this attempt
+    *triggered* a new lockout (so the caller can log it at WARNING)."""
+    with _throttle_lock:
+        rec = _throttle.get(ip)
+        if rec is None:
+            rec = {"fails": 0, "first": now, "locked_until": 0.0}
+        elif now - rec["first"] > _THR_WINDOW_S:
+            # window expired -> reset the counter
+            rec["fails"], rec["first"], rec["locked_until"] = 0, now, 0.0
+        was_locked = now < rec["locked_until"]
+        if not was_locked:
+            rec["fails"] += 1
+            if rec["fails"] >= _THR_MAX_FAILS:
+                rec["locked_until"] = now + _THR_LOCK_S
+        _throttle[ip] = rec
+        # cap the size: evict the oldest (longest-standing window start)
+        if len(_throttle) > _THR_MAX_IPS:
+            for k in sorted(_throttle, key=lambda k: _throttle[k]["first"])[:100]:
+                _throttle.pop(k, None)
+        return (not was_locked) and rec["fails"] == _THR_MAX_FAILS
+
+
 @app.before_request
 def _security_gate():
     # /health is the one route that must work with no auth (health checks).
     if request.path == "/health":
         return None
+    ip = request.remote_addr or "unknown"
     # DNS-rebinding guard: the Host header must be a known interface, no port.
     req_host = (request.host or "").split(":")[0].lower()
     if req_host and req_host not in _allowed_hosts(cfg):
         log.warning("rejected request: disallowed Host %r", req_host)
         abort(400)
-    # HTTP Basic auth (constant-time check via werkzeug); per-IP throttle.
+    # 1) Lockout check FIRST — never evaluate the credentials while the IP is
+    #    locked, so a correct password cannot win during the lockout.
+    now = time.time()
+    with _throttle_lock:
+        rec = _throttle.get(ip)
+        locked_until = rec["locked_until"] if rec else 0.0
+        fails = rec["fails"] if rec else 0
+    if fails >= _THR_MAX_FAILS and now < locked_until:
+        resp = make_response_401()
+        resp.headers["Retry-After"] = str(max(1, int(locked_until - now)))
+        return resp
+    # 2) Credential check (constant-time via werkzeug).
     auth = request.authorization
     if auth and auth.username == cfg.get("ui_username", "admin") and check_password_hash(
             cfg.get("ui_password_hash") or "", auth.password or ""):
-        _throttle.pop(request.remote_addr, None)
+        # success -> reset this IP's counter
+        with _throttle_lock:
+            _throttle.pop(ip, None)
         return None
-    ip = request.remote_addr or "unknown"
-    rec = _throttle.get(ip)
-    locked_until, fails = (rec if rec else (0.0, 0))
-    if fails >= 10 and time.time() < locked_until:
-        resp = make_response_401()
-        resp.headers["Retry-After"] = str(int(locked_until - time.time()))
-        return resp
-    if auth is not None:  # a credential attempt that failed -> count it
-        fails += 1
-        _throttle[ip] = (time.time() + 300 if fails >= 10 else locked_until, fails)
+    # 3) A credential attempt that failed -> record it (log any new lockout).
+    if auth is not None and _record_failure(ip, time.time()):
+        log.warning("login lockout triggered for %s (10 failures in 10 min; "
+                   "locked for 5 min)", ip)
     return make_response_401()
 
 
@@ -134,10 +181,6 @@ def make_response_401():
     r = Response("Authentication required.", status=401, mimetype="text/plain")
     r.headers["WWW-Authenticate"] = 'Basic realm="powerwall-dashboard"'
     return r
-
-
-# In-memory failed-login throttle: {ip: (locked_until, fails)}.
-_throttle = {}
 
 
 # ---- CSRF guard for state-changing (POST) routes ----
