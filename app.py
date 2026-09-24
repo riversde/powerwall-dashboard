@@ -5,10 +5,13 @@ gateway on a fixed interval (threaded timeout per cycle).
 """
 import logging
 import os
+import socket
 import time
+from getpass import getpass
+from werkzeug.security import check_password_hash
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request
 
 import config
 import powerwall
@@ -30,6 +33,105 @@ log = logging.getLogger("app")
 app = Flask(__name__)
 # Re-read templates on change so edits are never served stale across restarts.
 app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+
+def _lan_ips() -> list:
+    """Best-effort list of this machine's LAN IPv4 addresses."""
+    ips = set()
+    try:
+        ips.add(socket.gethostbyname(socket.gethostname()))
+    except Exception:
+        pass
+    try:
+        # the address the OS would use to reach the public internet
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+        finally:
+            s.close()
+    except Exception:
+        pass
+    return sorted(ips)
+
+
+def _allowed_hosts(cfg) -> set:
+    hosts = {"127.0.0.1", "localhost"}
+    hosts.update(_lan_ips())
+    for h in (cfg.get("allowed_hosts") or []):
+        h = str(h).strip().lower()
+        if h:
+            hosts.add(h)
+    return hosts
+
+
+@app.before_request
+def _security_gate():
+    # /health is the one route that must work with no auth (health checks).
+    if request.path == "/health":
+        return None
+    # DNS-rebinding guard: the Host header must be a known interface, no port.
+    req_host = (request.host or "").split(":")[0].lower()
+    if req_host and req_host not in _allowed_hosts(cfg):
+        log.warning("rejected request: disallowed Host %r", req_host)
+        abort(400)
+    # HTTP Basic auth (constant-time check via werkzeug); per-IP throttle.
+    auth = request.authorization
+    if auth and auth.username == cfg.get("ui_username", "admin") and check_password_hash(
+            cfg.get("ui_password_hash") or "", auth.password or ""):
+        _throttle.pop(request.remote_addr, None)
+        return None
+    ip = request.remote_addr or "unknown"
+    rec = _throttle.get(ip)
+    locked_until, fails = (rec if rec else (0.0, 0))
+    if fails >= 10 and time.time() < locked_until:
+        resp = make_response_401()
+        resp.headers["Retry-After"] = str(int(locked_until - time.time()))
+        return resp
+    if auth is not None:  # a credential attempt that failed -> count it
+        fails += 1
+        _throttle[ip] = (time.time() + 300 if fails >= 10 else locked_until, fails)
+    return make_response_401()
+
+
+def make_response_401():
+    from flask import Response
+    r = Response("Authentication required.", status=401, mimetype="text/plain")
+    r.headers["WWW-Authenticate"] = 'Basic realm="powerwall-dashboard"'
+    return r
+
+
+# In-memory failed-login throttle: {ip: (locked_until, fails)}.
+_throttle = {}
+
+
+# ---- CSRF guard for state-changing (POST) routes ----
+CSRF_HEADER = "X-Requested-With"
+CSRF_VALUE = "powerwall-dashboard"
+
+
+def _csrf_check():
+    """Reject non-browser/SPA cross-origin mutations. Returns an error response
+    or None. Order: missing custom header -> 403; wrong content-type -> 400;
+    Origin present but mismatched -> 403."""
+    if request.headers.get(CSRF_HEADER) != CSRF_VALUE:
+        return Response("Missing %s header." % CSRF_HEADER, status=403,
+                       mimetype="text/plain")
+    if not (request.content_type or "").startswith("application/json"):
+        return Response("Content-Type must be application/json.", status=400,
+                       mimetype="text/plain")
+    origin = request.headers.get("Origin")
+    if origin:
+        from urllib.parse import urlparse
+        try:
+            ohost = urlparse(origin).hostname or ""
+        except Exception:
+            ohost = ""
+        req_host = (request.host or "").split(":")[0].lower()
+        if ohost and ohost.lower() != req_host:
+            return Response("Origin does not match request host.", status=403,
+                           mimetype="text/plain")
+    return None
 
 # ---- state (module scope — NOT in before_request, per SQLite WAL rules) ----
 cfg = config.ensure_config()
@@ -202,9 +304,13 @@ def api_config_get():
 def api_config_set():
     """Update config — single storage backend (config.save) for all writes."""
     global cfg, client, poll_mod
+    err = _csrf_check()
+    if err is not None:
+        return err
     data = request.get_json(silent=True) or {}
     updatable = ("gateway", "enphase_gateway", "username", "email", "source",
-                "poll_interval_seconds", "grid_import_rate", "grid_export_credit")
+                "poll_interval_seconds", "grid_import_rate", "grid_export_credit",
+                "bind_host", "allowed_hosts")
     for k in updatable:
         if k in data and data[k] not in (None, ""):
             cfg[k] = data[k]
@@ -247,6 +353,10 @@ def api_config_set():
 
 @app.route("/api/reauth", methods=["POST"])
 def api_reauth():
+    err = _csrf_check()
+    if err is not None:
+        return err
+    request.get_json(silent=True)  # require a JSON body (may be {})
     client.auth_failed = False
     client.token = None
     ok = client.authenticate(force=True)
@@ -261,16 +371,43 @@ def health():
                    if storage.latest_snapshot else None})
 
 
-# ---- main ----
+# ---- first-run + main ----
+def _first_run_banner():
+    """If no UI password hash exists yet, generate one, persist it, and print the
+    plaintext ONCE to the console (not the log file)."""
+    global cfg
+    if not cfg.get("ui_password_hash"):
+        import secrets
+        pw = secrets.token_urlsafe(15)  # 20-char URL-safe password
+        cfg["ui_password_hash"] = config.hash_password(pw)
+        config.save(cfg)
+        print("\n" + "=" * 62, flush=True)
+        print("  POWERWALL DASHBOARD — first run (console only, not in logs)", flush=True)
+        print(f"  UI username : {cfg.get('ui_username', 'admin')}", flush=True)
+        print(f"  UI password : {pw}", flush=True)
+        print("  The dashboard now requires HTTP Basic auth. Save this password;", flush=True)
+        print("  reset it later with:  python app.py --set-ui-password", flush=True)
+        print("=" * 62 + "\n", flush=True)
+
+
 if __name__ == "__main__":
+    import sys
+    if "--set-ui-password" in sys.argv:
+        new = getpass("New UI password (input hidden): ")
+        if len(new) < 8:
+            print("Rejected: password must be at least 8 characters.", file=sys.stderr)
+            sys.exit(1)
+        config.set_ui_password(new)
+        sys.exit(0)
+    _first_run_banner()
     # one poll immediately so the page isn't empty on first load
     _poll_cycle()
     start_polling()
+    host = (cfg.get("bind_host") or "127.0.0.1").strip() or "127.0.0.1"
     try:
         from waitress import serve
-        log.info("serving on %s:%s", FLASK_HOST, FLASK_PORT)
-        serve(app, host=FLASK_HOST, port=FLASK_PORT,
-              threads=8, recv_bytes=65536)
+        log.info("serving on %s:%s", host, FLASK_PORT)
+        serve(app, host=host, port=FLASK_PORT, threads=8, recv_bytes=65536)
     except ImportError:
         log.warning("waitress missing — falling back to dev server")
-        app.run(host=FLASK_HOST, port=FLASK_PORT)
+        app.run(host=host, port=FLASK_PORT)

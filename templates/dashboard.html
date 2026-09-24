@@ -1196,7 +1196,7 @@ document.querySelectorAll('#source-switch button').forEach(b => {
     if(src === cur){ refresh(); return; }
     document.querySelectorAll('#source-switch button').forEach(x => x.disabled = true);
     try{
-      const r = await (await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({source: src})})).json();
+      const r = await (await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json','X-Requested-With':'powerwall-dashboard'}, body: JSON.stringify({source: src})})).json();
       if(r.ok){ syncSourceUI(r.source || src); refresh(); }
     }catch(e){}
     document.querySelectorAll('#source-switch button').forEach(x => x.disabled = false);

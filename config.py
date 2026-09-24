@@ -9,7 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 KEY_PATH = os.path.join(BASE_DIR, "config.key")
 
-SECRET_KEYS = ("local_api_password", "enphase_token")
+SECRET_KEYS = ("local_api_password", "enphase_token", "ui_password_hash")
 
 DEFAULTS = {
     "source": "tesla",   # "tesla" | "enphase"
@@ -22,6 +22,13 @@ DEFAULTS = {
     "poll_interval_seconds": 10,
     "grid_import_rate": 0.0,   # ZAR per kWh imported from grid (user sets)
     "grid_export_credit": 0.0,  # ZAR per kWh exported (user said no credit)
+    # --- web security ---
+    "ui_username": "admin",       # HTTP Basic username for the dashboard
+    "ui_password_hash": "",       # werkzeug hash (Fernet-encrypted at rest when set)
+    "bind_host": "127.0.0.1",    # set "0.0.0.0" to listen on the LAN (auth still applies)
+    "allowed_hosts": [],          # extra Host values to allow (merged with defaults + LAN IPs)
+    "gateway_cert_sha256": "",    # Tesla gateway TLS SHA-256 pin (hex; TOFU on first connect)
+    "enphase_cert_sha256": "",    # Enphase IQ Gateway TLS SHA-256 pin (hex; TOFU)
 }
 
 
@@ -72,6 +79,20 @@ def save(cfg: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(raw, fh, indent=2)
     os.replace(tmp, CONFIG_PATH)
+
+
+def hash_password(pw: str) -> str:
+    from werkzeug.security import generate_password_hash
+    return generate_password_hash(pw)
+
+
+def set_ui_password(pw: str) -> dict:
+    """Set a new UI password (hash only; the plaintext is never stored or logged)."""
+    cfg = load()
+    cfg["ui_password_hash"] = hash_password(pw)
+    save(cfg)
+    print("UI password updated (hash stored; plaintext not kept).", flush=True)
+    return cfg
 
 
 def ensure_config() -> dict:
