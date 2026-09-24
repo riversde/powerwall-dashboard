@@ -133,6 +133,62 @@ def _csrf_check():
                            mimetype="text/plain")
     return None
 
+# ---- Fix 3: gateway URL + field validation ----
+import ipaddress
+from urllib.parse import urlparse
+
+
+def _valid_gateway(value) -> bool:
+    """An https:// URL whose host is a private/link-local IP (not loopback,
+    not multicast) or a hostname ending in .local. No path, query or userinfo."""
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    try:
+        p = urlparse(v)
+    except Exception:
+        return False
+    if p.scheme != "https":
+        return False
+    host = (p.hostname or "").lower()
+    if not host or p.query or p.path or p.fragment:
+        return False
+    if p.username is not None:  # userinfo (https://user:pass@host)
+        return False
+    if host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.is_loopback or ip.is_multicast or not ip.is_private:
+        return False
+    return True
+
+
+def _validate_updatable(data: dict) -> list:
+    """Type/whitelist checks; returns a list of error strings (empty = OK).
+    Unknown keys are silently ignored by the caller."""
+    errs = []
+    if "source" in data and data["source"] not in ("tesla", "enphase"):
+        errs.append("source must be 'tesla' or 'enphase'")
+    if "poll_interval_seconds" in data:
+        v = data["poll_interval_seconds"]
+        if not isinstance(v, int) or isinstance(v, bool) or not (10 <= v <= 3600):
+            errs.append("poll_interval_seconds must be an int 10-3600")
+    for k in ("grid_import_rate", "grid_export_credit"):
+        if k in data:
+            v = data[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0 <= float(v) <= 100):
+                errs.append(f"{k} must be a number 0-100")
+    for k in ("username", "email"):
+        if k in data:
+            v = data[k]
+            if not isinstance(v, str) or len(v) > 128:
+                errs.append(f"{k} must be a string of 128 chars or fewer")
+    return errs
+
+
 # ---- state (module scope — NOT in before_request, per SQLite WAL rules) ----
 cfg = config.ensure_config()
 storage.init_db()
@@ -311,6 +367,30 @@ def api_config_set():
     updatable = ("gateway", "enphase_gateway", "username", "email", "source",
                 "poll_interval_seconds", "grid_import_rate", "grid_export_credit",
                 "bind_host", "allowed_hosts")
+
+    # ---- Fix 3: validate everything BEFORE writing anything ----
+    errs = _validate_updatable(data)
+    if data.get("gateway") not in (None, "") and not _valid_gateway(data["gateway"]):
+        errs.append("gateway must be an https:// private-IP or *.local URL (no path/query/userinfo)")
+    if data.get("enphase_gateway") not in (None, "") and not _valid_gateway(data["enphase_gateway"]):
+        errs.append("enphase_gateway must be an https:// private-IP or *.local URL (no path/query/userinfo)")
+    if errs:
+        return jsonify(ok=False, errors=errs), 400
+
+    # Changing a host requires the matching secret in the SAME request —
+    # otherwise the saved secret could be silently pointed at a new host.
+    gw_changed = (data.get("gateway") not in (None, "")
+                 and data.get("gateway") != cfg.get("gateway"))
+    egw_changed = (data.get("enphase_gateway") not in (None, "")
+                  and data.get("enphase_gateway") != cfg.get("enphase_gateway"))
+    if gw_changed and not data.get("local_api_password"):
+        return jsonify(ok=False, error="changing gateway requires "
+                                       "local_api_password in the same request"), 400
+    if egw_changed and not data.get("enphase_token"):
+        return jsonify(ok=False, error="changing enphase_gateway requires "
+                                       "enphase_token in the same request"), 400
+
+    # Apply validated fields (whitelist; unknown keys are ignored).
     for k in updatable:
         if k in data and data[k] not in (None, ""):
             cfg[k] = data[k]
@@ -318,13 +398,14 @@ def api_config_set():
         cfg["local_api_password"] = data["local_api_password"]
     if data.get("enphase_token"):
         cfg["enphase_token"] = data["enphase_token"]
-    config.save(cfg)  # same backend as reads (config.load/save)
-    # source changed? rebuild the client for the new system
-    new_mod, new_client = build_source(cfg)
-    if type(new_client) is not type(client):
+    config.save(cfg)
+    # Rebuild the client on a source OR gateway change (a gateway change
+    # used to only take effect after a restart).
+    if ("source" in data) or gw_changed or egw_changed:
+        new_mod, new_client = build_source(cfg)
         client = new_client
         poll_mod = new_mod
-        log.info("source switched — rebuilt client: %s", type(client).__name__)
+        log.info("rebuilt client: %s", type(client).__name__)
     # pick up new interval on the fly
     if "poll_interval_seconds" in data:
         interval = max(int(cfg["poll_interval_seconds"]), 10)
@@ -334,10 +415,9 @@ def api_config_set():
                                         seconds=interval)
             except Exception:
                 log.exception("reschedule failed")
-    # re-auth immediately after a credential/source change
+    # re-auth immediately after a credential/source/gateway change
     if (data.get("local_api_password") or data.get("enphase_token")
-            or "source" in data or "gateway" in data
-            or "enphase_gateway" in data):
+            or "source" in data or gw_changed or egw_changed):
         client.auth_failed = False
         client.token = None
         # a new token/source is a fresh start — clear the class-level
