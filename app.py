@@ -84,9 +84,13 @@ def _security_headers(resp):
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         f"script-src 'self' 'nonce-{nonce}'; "
-        f"style-src 'self' 'nonce-{nonce}' https://fonts.googleapis.com; "
+        # style-src uses 'unsafe-inline' (no nonce): a nonce on style-src makes
+        # the browser IGNORE 'unsafe-inline', and a nonce never covers the 78+
+        # inline style="…" attributes in the markup. So the inline styles are
+        # permitted via 'unsafe-inline'; the <style> block is covered too.
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
-        "img-src 'self'; "
+        "img-src 'self' data:; "
         "connect-src 'self'; "
         "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
