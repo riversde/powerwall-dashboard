@@ -429,15 +429,31 @@ def api_energy():
     return jsonify(e)
 
 
+# The ONLY config keys that never leave to the client. One constant so the
+# GET and POST handlers can't drift apart.
+PRIVATE_KEYS = {"local_api_password", "enphase_token", "email",
+               "ui_password_hash"}
+
+
+def _public_cfg(cfg: dict) -> dict:
+    """Config for clients: never the secret values, plus has_* presence flags.
+
+    Used by BOTH the GET and POST /api/config handlers. Excludes the single
+    PRIVATE_KEYS constant and adds has_* presence flags (the flag names are
+    stable: has_password, has_enphase_token, has_email, has_ui_password).
+    """
+    out = {k: v for k, v in cfg.items() if k not in PRIVATE_KEYS}
+    out["has_password"] = bool(cfg.get("local_api_password"))
+    out["has_enphase_token"] = bool(cfg.get("enphase_token"))
+    out["has_email"] = bool(cfg.get("email"))
+    out["has_ui_password"] = bool(cfg.get("ui_password_hash"))
+    return out
+
+
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    # Never expose the secrets in plaintext.
-    public = {k: v for k, v in cfg.items()
-             if k not in ("local_api_password", "enphase_token", "email")}
-    public["has_password"] = bool(cfg.get("local_api_password"))
-    public["has_enphase_token"] = bool(cfg.get("enphase_token"))
-    public["has_email"] = bool(cfg.get("email"))
-    return jsonify(public)
+    """Config for clients — never the secret values (see _public_cfg)."""
+    return jsonify(_public_cfg(cfg))
 
 
 @app.route("/api/config", methods=["POST"])
@@ -515,13 +531,10 @@ def api_config_set():
         # block the new token's first attempt)
         type(client)._last_auth_fail = 0.0
         client.authenticate(force=True)
-    # Mirror the GET endpoint: never echo secrets (incl. email) in the
-    # confirmation; expose has_* flags instead.
-    public = {k: v for k, v in cfg.items()
-              if k not in ("local_api_password", "enphase_token", "email")}
-    public["has_password"] = bool(cfg.get("local_api_password"))
-    public["has_enphase_token"] = bool(cfg.get("enphase_token"))
-    public["has_email"] = bool(cfg.get("email"))
+    # Mirror the GET endpoint exactly: never echo secrets in the
+    # confirmation; expose has_* flags instead (shared _public_cfg so the
+    # two handlers can't drift apart).
+    public = _public_cfg(cfg)
     return jsonify({"ok": True, "config": public,
                    "source": cfg.get("source")})
 
