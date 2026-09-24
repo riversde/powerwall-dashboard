@@ -83,8 +83,10 @@ class PowerwallClient:
                 log.info("authenticated, token acquired")
             else:
                 self._last_auth_fail = time.time()
-                log.warning("authenticate: no token in response (HTTP %s): %s — "
-                           "%d s lockout", r.status_code, data, self._AUTH_LOCKOUT_S)
+                log.warning("authenticate: no token in response (HTTP %s): keys=%s — "
+                           "%d s lockout", r.status_code,
+                           sorted(data.keys()) if isinstance(data, dict) else "non-dict",
+                           self._AUTH_LOCKOUT_S)
             return bool(self.token)
         except Exception as e:
             self.auth_failed = True

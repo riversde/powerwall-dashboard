@@ -20,11 +20,17 @@ import storage
 # ---- logging ----
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+from logging.handlers import RotatingFileHandler
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, "powerwall.log"), encoding="utf-8"),
+        RotatingFileHandler(
+            os.path.join(LOG_DIR, "powerwall.log"),
+            maxBytes=5 * 1024 * 1024,  # 5 MB
+            backupCount=5,
+            encoding="utf-8",
+        ),
         logging.StreamHandler(),
     ],
 )
@@ -302,7 +308,13 @@ def api_energy():
     period = request.args.get("period", "today")
     now = dt.datetime.now()
     import time as _t
-    n = int(request.args.get("n", 7)) if "n_days" in period else 7
+    n = 7
+    if "n_days" in period:
+        try:
+            n = int(request.args.get("n", 7))
+        except (ValueError, TypeError):
+            return jsonify({"error": "invalid n (must be an integer)"}), 400
+        n = max(1, min(3650, n))  # clamp to 1–3650
     start = end = None
     if period == "today":
         start = dt.datetime(now.year, now.month, now.day).timestamp()
