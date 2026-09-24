@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Powerwall 2 — Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-<style>
+<script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"
+        integrity="sha384-JUh163oCRItcbPme8pYnROHQMC6fNKTBWtRG3I3I0erJkzNgL7uxKlNwcrcFKeqF"
+        crossorigin="anonymous"></script>
+<style nonce="{{ nonce }}">
 :root{
   --bg:#0b1220; --panel:#111a2c; --panel2:#0e1626; --border:#1e2a44;
   --text:#dce6f5; --muted:#8fa3c0; --green:#3ddc84; --red:#ff5c5c;
@@ -808,7 +810,7 @@ body { margin: 0; background: var(--pf-ground); color: var(--pf-text); font-fami
   </div>
 </div>
 
-<script>
+<script nonce="{{ nonce }}">
 const $ = id => document.getElementById(id);
 const fmtKw = w => w==null ? '—' : (Math.abs(w)>=1000 ? (w/1000).toFixed(2)+' kW' : Math.round(w)+' W');
 const S = {};

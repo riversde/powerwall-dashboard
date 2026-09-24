@@ -11,7 +11,7 @@ from getpass import getpass
 from werkzeug.security import check_password_hash
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, Response, abort, jsonify, render_template, request
+from flask import Flask, Response, abort, g, jsonify, render_template, request
 
 import config
 import powerwall
@@ -69,6 +69,31 @@ def _allowed_hosts(cfg) -> set:
         if h:
             hosts.add(h)
     return hosts
+
+
+@app.before_request
+def _csp_nonce_request():
+    # Per-request CSP nonce (shared by the inline <script>/<style> and the header).
+    import base64, secrets as _s
+    g.csp_nonce = base64.b64encode(_s.token_bytes(16)).decode("ascii")
+
+
+@app.after_request
+def _security_headers(resp):
+    nonce = getattr(g, "csp_nonce", "")
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}'; "
+        f"style-src 'self' 'nonce-{nonce}' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self'; "
+        "connect-src 'self'; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    )
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
 
 @app.before_request
@@ -257,7 +282,7 @@ def start_polling():
 # ---- API routes ----
 @app.route("/")
 def index():
-    return render_template("dashboard.html", port=FLASK_PORT)
+    return render_template("dashboard.html", port=FLASK_PORT, nonce=g.csp_nonce)
 
 
 # energy cache (recomputed max once/60s — the page polls status every 5s)
