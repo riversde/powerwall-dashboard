@@ -1,7 +1,7 @@
 """Powerwall Gateway client + poller.
 
 Auth: POST {gateway}/api/login/Basic  {"username": "customer", "password": ...}
-     -> {"token": "..."} used as Authorization: Bearer <token>.
+     -> {"token": "..."} used as Authorization: Bearer <token>
 Data: /api/system_status/soe, /api/meters/aggregates, /api/system_status,
       /api/sitemaster, /api/operation  (all with the same Bearer token).
 
@@ -86,7 +86,7 @@ class PowerwallClient:
             return False
 
     def _headers(self):
-        return {"Authorization": "***" + self.token} if self.token else {}
+        return {"Authorization": "Bearer " + self.token} if self.token else {}
 
     def _get_or_reauth(self, path):
         try:

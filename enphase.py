@@ -1,7 +1,7 @@
 """Enphase IQ Gateway (backbone v07.00.x) client + poller.
 
 Auth protocol (verified against the live gateway):
-  * GET {gateway}/auth/check_jwt  Authorization: Bearer ***
+  * GET {gateway}/auth/check_jwt  Authorization: Bearer <token>
     -> 200 + Set-Cookie: sessionId=...   (the token is bound to ONE session)
   * API calls must use the sessionId cookie ONLY. Any request carrying the
     Bearer token on an API endpoint gets a connection reset (HTTP 000).
@@ -147,14 +147,14 @@ class EnphaseIQGateway:
             return False
         try:
             if self._aborted():
-                return {"error": "aborted"}
+                return False
             r = self.session.get(self.base + "/auth/check_jwt",
-                                headers={"Authorization": "***" + token},
+                                headers={"Authorization": "Bearer " + token},
                                 timeout=8)
             if r.status_code == 200 and self._have_session():
                 self.token = token
                 self.auth_failed = False
-                _save_cookie("sessionId", self.session.cookies.get("sessionId"))
+                _save_cookie("sessionId", self._get_cookie("sessionId"))
                 log.info("enphase: session established via JWT")
                 return True
             self._last_auth_fail = time.time()
