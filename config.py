@@ -1,15 +1,55 @@
-"""Config for Powerwall Dashboard — Fernet-encrypted secrets in config.json."""
+# -*- coding: utf-8 -*-
+"""Config for Powerwall Dashboard — Fernet-encrypted secrets in config.json.
+
+Fix 5 (secrets at rest): on Windows the Fernet key is protected with DPAPI
+(win32crypt.CryptProtectData) and stored as config.key.dpapi; the plaintext
+config.key is migrated automatically and then deleted. On non-Windows (or if
+pywin32 is unavailable) it falls back to the plaintext config.key and logs a
+warning. Where the platform allows, config.json and the key file are chmod 0600.
+"""
 import base64
 import json
+import logging
 import os
 
 from cryptography.fernet import Fernet
 
+log = logging.getLogger("config")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 KEY_PATH = os.path.join(BASE_DIR, "config.key")
+KEY_DPAPI_PATH = os.path.join(BASE_DIR, "config.key.dpapi")
 
 SECRET_KEYS = ("local_api_password", "enphase_token", "ui_password_hash")
+
+
+def _restrict(path):
+    """Tighten a file to owner-only (chmod 0600) where the platform allows it."""
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass  # e.g. Windows, or a path that cannot be chmod'd
+
+
+def _dpapi_available():
+    if os.name != "nt":
+        return False
+    try:
+        import win32crypt  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _dpapi_protect(blob: bytes) -> bytes:
+    import win32crypt
+    return win32crypt.CryptProtectData(blob)
+
+
+def _dpapi_unprotect(blob: bytes) -> bytes:
+    import win32crypt
+    return win32crypt.CryptUnprotectData(blob)[1]
 
 DEFAULTS = {
     "source": "tesla",   # "tesla" | "enphase"
@@ -33,12 +73,50 @@ DEFAULTS = {
 
 
 def _fernet() -> Fernet:
+    # 1) DPAPI-protected key (preferred on Windows).
+    if os.path.isfile(KEY_DPAPI_PATH):
+        try:
+            with open(KEY_DPAPI_PATH, "rb") as f:
+                blob = f.read()
+            return Fernet(_dpapi_unprotect(blob))
+        except Exception as e:
+            log.warning("DPAPI key read failed (%s); falling back", e)
+    # 2) Plaintext key (fallback, or the pre-migration state).
     if os.path.isfile(KEY_PATH):
         with open(KEY_PATH, "rb") as f:
-            return Fernet(f.read())
+            key = f.read()
+        if _dpapi_available():
+            try:  # migrate: protect + replace the plaintext key
+                with open(KEY_DPAPI_PATH, "wb") as f:
+                    f.write(_dpapi_protect(key))
+                _restrict(KEY_DPAPI_PATH)
+                os.remove(KEY_PATH)
+                log.info("migrated config.key -> config.key.dpapi (DPAPI); "
+                         "plaintext key removed")
+                return Fernet(key)
+            except Exception as e:
+                log.warning("DPAPI migration failed (%s); using plaintext key", e)
+        else:
+            log.warning("config.key is plaintext (DPAPI unavailable) — the "
+                        "Fernet key is unencrypted at rest")
+        return Fernet(key)
+    # 3) Generate a fresh key.
     key = Fernet.generate_key()
-    with open(KEY_PATH, "wb") as f:
-        f.write(key)
+    if _dpapi_available():
+        try:
+            with open(KEY_DPAPI_PATH, "wb") as f:
+                f.write(_dpapi_protect(key))
+            _restrict(KEY_DPAPI_PATH)
+        except Exception as e:
+            log.warning("could not store DPAPI key (%s); using plaintext", e)
+            with open(KEY_PATH, "wb") as f:
+                f.write(key)
+            _restrict(KEY_PATH)
+    else:
+        with open(KEY_PATH, "wb") as f:
+            f.write(key)
+        _restrict(KEY_PATH)
+        log.warning("config.key stored as plaintext (DPAPI unavailable)")
     return Fernet(key)
 
 
@@ -78,7 +156,9 @@ def save(cfg: dict) -> None:
     tmp = CONFIG_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(raw, fh, indent=2)
+    _restrict(tmp)
     os.replace(tmp, CONFIG_PATH)
+    _restrict(CONFIG_PATH)
 
 
 def hash_password(pw: str) -> str:
