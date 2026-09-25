@@ -6,6 +6,7 @@ gateway on a fixed interval (threaded timeout per cycle).
 import logging
 import os
 import socket
+import threading
 import time
 from getpass import getpass
 from werkzeug.security import check_password_hash
@@ -61,9 +62,26 @@ def _lan_ips() -> list:
     return sorted(ips)
 
 
+# Item 7: the LAN interface IPs (gethostbyname + a UDP connect) must NOT be
+# recomputed on every request (DNS/UDP on the hot path). Compute once,
+# refresh at most every 10 minutes.
+_LAN_IPS_TTL_S = 600.0
+_lan_ips_lock = threading.Lock()
+_lan_ips_cache = {"ts": 0.0, "ips": []}
+
+
+def _lan_ips_cached() -> list:
+    with _lan_ips_lock:
+        now = time.time()
+        if not _lan_ips_cache["ips"] or now - _lan_ips_cache["ts"] >= _LAN_IPS_TTL_S:
+            _lan_ips_cache["ips"] = _lan_ips()
+            _lan_ips_cache["ts"] = now
+        return _lan_ips_cache["ips"]
+
+
 def _allowed_hosts(cfg) -> set:
     hosts = {"127.0.0.1", "localhost"}
-    hosts.update(_lan_ips())
+    hosts.update(_lan_ips_cached())
     for h in (cfg.get("allowed_hosts") or []):
         h = str(h).strip().lower()
         if h:
@@ -84,9 +102,13 @@ def _security_headers(resp):
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         f"script-src 'self' 'nonce-{nonce}'; "
-        f"style-src 'self' 'nonce-{nonce}' https://fonts.googleapis.com; "
+        # style-src uses 'unsafe-inline' (no nonce): a nonce on style-src makes
+        # the browser IGNORE 'unsafe-inline', and a nonce never covers the 78+
+        # inline style="…" attributes in the markup. So the inline styles are
+        # permitted via 'unsafe-inline'; the <style> block is covered too.
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
-        "img-src 'self'; "
+        "img-src 'self' data:; "
         "connect-src 'self'; "
         "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
@@ -96,32 +118,84 @@ def _security_headers(resp):
     return resp
 
 
+# ---- failed-login throttle (per-IP sliding window) ----
+# 10 failed credential attempts within a 10-minute window -> locked out for
+# 5 minutes. The lockout is checked BEFORE the credentials are evaluated, so a
+# correct password cannot win while an IP is locked (the throttle actually
+# slows brute force). Thread-safe (Waitress runs 8 threads) and bounded
+# (at most 10,000 tracked IPs; the oldest are evicted).
+
+_throttle = {}  # {ip: {"fails": int, "first": ts, "locked_until": ts}}
+_throttle_lock = threading.Lock()
+_THR_MAX_IPS = 10_000
+_THR_WINDOW_S = 600   # 10 minutes
+_THR_MAX_FAILS = 10
+_THR_LOCK_S = 300     # 5 minutes
+
+
+def _record_failure(ip: str, now: float) -> bool:
+    """Record one failed credential attempt. Returns True if this attempt
+    *triggered* a new lockout (so the caller can log it at WARNING)."""
+    with _throttle_lock:
+        rec = _throttle.get(ip)
+        if rec is None:
+            rec = {"fails": 0, "first": now, "locked_until": 0.0}
+        elif now - rec["first"] > _THR_WINDOW_S:
+            # window expired -> reset the counter
+            rec["fails"], rec["first"], rec["locked_until"] = 0, now, 0.0
+        was_locked = now < rec["locked_until"]
+        if not was_locked:
+            rec["fails"] += 1
+            if rec["fails"] >= _THR_MAX_FAILS:
+                rec["locked_until"] = now + _THR_LOCK_S
+        _throttle[ip] = rec
+        # cap the size: evict the oldest (longest-standing window start)
+        if len(_throttle) > _THR_MAX_IPS:
+            for k in sorted(_throttle, key=lambda k: _throttle[k]["first"])[:100]:
+                _throttle.pop(k, None)
+        return (not was_locked) and rec["fails"] == _THR_MAX_FAILS
+
+
 @app.before_request
 def _security_gate():
     # /health is the one route that must work with no auth (health checks).
     if request.path == "/health":
         return None
+    ip = request.remote_addr or "unknown"
     # DNS-rebinding guard: the Host header must be a known interface, no port.
-    req_host = (request.host or "").split(":")[0].lower()
-    if req_host and req_host not in _allowed_hosts(cfg):
+    # Item 7: a MISSING or EMPTY Host is a bypass of that guard — reject it
+    # with 400 (never fall through to the un-checked path).
+    raw_host = request.headers.get("Host") or ""
+    if not raw_host.strip():
+        log.warning("rejected request: missing/empty Host header from %s", ip)
+        abort(400)
+    req_host = raw_host.split(":")[0].lower()
+    if req_host not in _allowed_hosts(cfg):
         log.warning("rejected request: disallowed Host %r", req_host)
         abort(400)
-    # HTTP Basic auth (constant-time check via werkzeug); per-IP throttle.
+    # 1) Lockout check FIRST — never evaluate the credentials while the IP is
+    #    locked, so a correct password cannot win during the lockout.
+    now = time.time()
+    with _throttle_lock:
+        rec = _throttle.get(ip)
+        locked_until = rec["locked_until"] if rec else 0.0
+        fails = rec["fails"] if rec else 0
+    if fails >= _THR_MAX_FAILS and now < locked_until:
+        resp = make_response_401()
+        resp.headers["Retry-After"] = str(max(1, int(locked_until - now)))
+        return resp
+    # 2) Credential check (constant-time via werkzeug).
     auth = request.authorization
     if auth and auth.username == cfg.get("ui_username", "admin") and check_password_hash(
             cfg.get("ui_password_hash") or "", auth.password or ""):
-        _throttle.pop(request.remote_addr, None)
+        # success -> reset this IP's counter
+        with _throttle_lock:
+            _throttle.pop(ip, None)
         return None
-    ip = request.remote_addr or "unknown"
-    rec = _throttle.get(ip)
-    locked_until, fails = (rec if rec else (0.0, 0))
-    if fails >= 10 and time.time() < locked_until:
-        resp = make_response_401()
-        resp.headers["Retry-After"] = str(int(locked_until - time.time()))
-        return resp
-    if auth is not None:  # a credential attempt that failed -> count it
-        fails += 1
-        _throttle[ip] = (time.time() + 300 if fails >= 10 else locked_until, fails)
+    # 3) A credential attempt that failed -> record it (log any new lockout).
+    if auth is not None and _record_failure(ip, time.time()):
+        log.warning("login lockout triggered for %s (10 failures in 10 min; "
+                   "locked for 5 min)", ip)
     return make_response_401()
 
 
@@ -130,10 +204,6 @@ def make_response_401():
     r = Response("Authentication required.", status=401, mimetype="text/plain")
     r.headers["WWW-Authenticate"] = 'Basic realm="powerwall-dashboard"'
     return r
-
-
-# In-memory failed-login throttle: {ip: (locked_until, fails)}.
-_throttle = {}
 
 
 # ---- CSRF guard for state-changing (POST) routes ----
@@ -222,6 +292,17 @@ def _validate_updatable(data: dict) -> list:
 
 # ---- state (module scope — NOT in before_request, per SQLite WAL rules) ----
 cfg = config.ensure_config()
+# Item 7: one-shot migration — if the source is enphase but enphase_gateway
+# is empty, copy gateway into it ONCE, save, and log. After this, the
+# Enphase client uses ONLY enphase_gateway (no fallback), so a Tesla
+# gateway change can never redirect the Enphase JWT.
+if cfg.get("source", "tesla") == "enphase" and not (cfg.get("enphase_gateway") or "").strip() \
+        and (cfg.get("gateway") or "").strip():
+    cfg["enphase_gateway"] = cfg["gateway"]
+    config.save(cfg)
+    log.warning("enphase_gateway was empty — one-shot migration: copied "
+                "gateway (%s) into enphase_gateway. Enphase now uses only "
+                "enphase_gateway.", cfg["enphase_gateway"])
 storage.init_db()
 storage.maybe_rollup()
 
@@ -382,15 +463,31 @@ def api_energy():
     return jsonify(e)
 
 
+# The ONLY config keys that never leave to the client. One constant so the
+# GET and POST handlers can't drift apart.
+PRIVATE_KEYS = {"local_api_password", "enphase_token", "email",
+               "ui_password_hash"}
+
+
+def _public_cfg(cfg: dict) -> dict:
+    """Config for clients: never the secret values, plus has_* presence flags.
+
+    Used by BOTH the GET and POST /api/config handlers. Excludes the single
+    PRIVATE_KEYS constant and adds has_* presence flags (the flag names are
+    stable: has_password, has_enphase_token, has_email, has_ui_password).
+    """
+    out = {k: v for k, v in cfg.items() if k not in PRIVATE_KEYS}
+    out["has_password"] = bool(cfg.get("local_api_password"))
+    out["has_enphase_token"] = bool(cfg.get("enphase_token"))
+    out["has_email"] = bool(cfg.get("email"))
+    out["has_ui_password"] = bool(cfg.get("ui_password_hash"))
+    return out
+
+
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    # Never expose the secrets in plaintext.
-    public = {k: v for k, v in cfg.items()
-             if k not in ("local_api_password", "enphase_token", "email")}
-    public["has_password"] = bool(cfg.get("local_api_password"))
-    public["has_enphase_token"] = bool(cfg.get("enphase_token"))
-    public["has_email"] = bool(cfg.get("email"))
-    return jsonify(public)
+    """Config for clients — never the secret values (see _public_cfg)."""
+    return jsonify(_public_cfg(cfg))
 
 
 @app.route("/api/config", methods=["POST"])
@@ -401,9 +498,20 @@ def api_config_set():
     if err is not None:
         return err
     data = request.get_json(silent=True) or {}
+    # Item 6: bind_host / allowed_hosts are NOT API-writable (they are
+    # network-level keys — a remote writer must not be able to expose the
+    # server to the world or open the Host gate). They are edited in
+    # config.json or via the CLI:
+    #   python app.py --set-bind-host <ip>
+    #   python app.py --add-allowed-host <host>
+    # (both validated; see config.set_bind_host / add_allowed_host).
+    for k in ("bind_host", "allowed_hosts"):
+        if k in data and data[k] not in (None, ""):
+            return jsonify(ok=False, error=f"{k} is not API-writable; "
+                "edit config.json or use the CLI "
+                f"(python app.py --set-bind-host / --add-allowed-host)"), 400
     updatable = ("gateway", "enphase_gateway", "username", "email", "source",
-                "poll_interval_seconds", "grid_import_rate", "grid_export_credit",
-                "bind_host", "allowed_hosts")
+                "poll_interval_seconds", "grid_import_rate", "grid_export_credit")
 
     # ---- Fix 3: validate everything BEFORE writing anything ----
     errs = _validate_updatable(data)
@@ -468,13 +576,10 @@ def api_config_set():
         # block the new token's first attempt)
         type(client)._last_auth_fail = 0.0
         client.authenticate(force=True)
-    # Mirror the GET endpoint: never echo secrets (incl. email) in the
-    # confirmation; expose has_* flags instead.
-    public = {k: v for k, v in cfg.items()
-              if k not in ("local_api_password", "enphase_token", "email")}
-    public["has_password"] = bool(cfg.get("local_api_password"))
-    public["has_enphase_token"] = bool(cfg.get("enphase_token"))
-    public["has_email"] = bool(cfg.get("email"))
+    # Mirror the GET endpoint exactly: never echo secrets in the
+    # confirmation; expose has_* flags instead (shared _public_cfg so the
+    # two handlers can't drift apart).
+    public = _public_cfg(cfg)
     return jsonify({"ok": True, "config": public,
                    "source": cfg.get("source")})
 
@@ -527,6 +632,35 @@ if __name__ == "__main__":
             sys.exit(1)
         config.set_ui_password(new)
         sys.exit(0)
+
+    # Item 6 CLI: network keys are set from the command line (validated),
+    # never via the API.
+    def _arg_value(name):
+        if name in sys.argv:
+            i = sys.argv.index(name)
+            if i + 1 < len(sys.argv):
+                return sys.argv[i + 1]
+            print(f"Missing value for {name}", file=sys.stderr)
+            sys.exit(2)
+        return None
+
+    val = _arg_value("--set-bind-host")
+    if val is not None:
+        try:
+            config.set_bind_host(val)
+        except ValueError as e:
+            print(f"Rejected: {e}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+    val = _arg_value("--add-allowed-host")
+    if val is not None:
+        try:
+            config.add_allowed_host(val)
+        except ValueError as e:
+            print(f"Rejected: {e}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+
     _first_run_banner()
     # one poll immediately so the page isn't empty on first load
     _poll_cycle()
