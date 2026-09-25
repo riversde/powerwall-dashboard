@@ -131,6 +131,20 @@ Adding a new source = one module with `poll_once()` + a name in
   `Referrer-Policy: no-referrer`. Chart.js is served **locally**
   (`static/vendor/chart.umd.min.js`, SRI `sha384` verified).
 
+### Basic auth is unencrypted over plain HTTP
+
+- The web layer authenticates with **HTTP Basic auth over `http://`** — the
+  username and password travel **in the clear** on every request. On a
+  trusted LAN this is usually acceptable, but anything anyone can sniff
+  (Wi-Fi, switch port-mirroring, a compromised host) sees the password.
+- **Recommendations for LAN / remote use:**
+  - Keep `bind_host = 127.0.0.1` (localhost only) unless you specifically
+    need LAN access — this is the default and the safest option.
+  - For LAN/remote access, put a **TLS reverse proxy** (Caddy or nginx)
+    in front of the dashboard and terminate TLS there; reach the app only
+    via `https://` on the proxy. This keeps the Basic-auth credentials
+    encrypted in transit.
+
 ### Secrets at rest
 
 - `config.json` stores the local API password, the Enphase token and the UI
