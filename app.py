@@ -534,6 +534,13 @@ def api_config_set():
     if egw_changed and not data.get("enphase_token"):
         return jsonify(ok=False, error="changing enphase_gateway requires "
                                        "enphase_token in the same request"), 400
+    # Switching the source to enphase requires a configured enphase_gateway:
+    # the Enphase client no longer falls back to the Tesla gateway, so
+    # without it the poller would point the IQ gateway at nothing.
+    if data.get("source") == "enphase" and not (
+            data.get("enphase_gateway") or cfg.get("enphase_gateway")):
+        return jsonify(ok=False,
+                       error="set enphase_gateway (and enphase_token) first"), 400
 
     # Apply validated fields (whitelist; unknown keys are ignored).
     for k in updatable:
