@@ -19,6 +19,7 @@ import time
 import requests
 import urllib3
 import config
+from urllib.parse import urlparse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -36,6 +37,24 @@ METER_KEY_MAP = {
     "generator": "generator",
 }
 
+
+def _pin_mismatch_msg(e, host: str, pin_key: str):
+    """If e is a TLS fingerprint-pin rejection (the handshake was refused
+    before any bytes left the process), return the diagnostic message to
+    surface as last_error; otherwise return None. A mismatch means the
+    stored pin no longer matches the gateway certificate — the fix is to
+    clear that pin in config.json so the next request re-pins.
+
+    The refusal may surface as a bare SSLError or, after urllib3's
+    retry, wrapped in a MaxRetryError; check the exception chain."""
+    for x in (e,) + (getattr(e, "__cause__", None),):
+        if isinstance(x, requests.exceptions.SSLError) \
+                and "Fingerprints did not match" in str(x):
+            return ("certificate fingerprint mismatch for %s — refusing to send "
+                    "credentials; clear %s in config.json to re-pin"
+                    % (host, pin_key))
+    return None
+
 POWER_FIELDS = ("instant_power", "watts", "W")
 
 
@@ -45,8 +64,10 @@ class PowerwallClient:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.base = cfg["gateway"].rstrip("/")
+        self._host = urlparse(cfg["gateway"]).hostname or "gateway"
         self.token = None
         self.auth_failed = False
+        self.last_error = None  # surfaced via poll_state -> /api/status
         self._last_auth_fail = 0.0
         self._reauthed = False  # reset per poll: re-auth at most once per poll
         self.stop_event = None  # set by the poll guard to abort a slow poll
@@ -94,6 +115,12 @@ class PowerwallClient:
                            self._AUTH_LOCKOUT_S)
             return bool(self.token)
         except Exception as e:
+            m = _pin_mismatch_msg(e, self._host, "gateway_cert_sha256")
+            if m:
+                self.last_error = m
+                log.warning("authenticate: %s", m)
+            else:
+                self.last_error = str(e)
             self.auth_failed = True
             self._last_auth_fail = time.time()
             log.warning("authenticate error: %s — %d s lockout", e, self._AUTH_LOCKOUT_S)
@@ -119,6 +146,10 @@ class PowerwallClient:
             r.raise_for_status()
             return r.json()
         except Exception as e:
+            m = _pin_mismatch_msg(e, self._host, "gateway_cert_sha256")
+            if m:
+                self.last_error = m  # surfaced via poll_state -> /api/status
+                return {"error": m}
             return {"error": f"{type(e).__name__}: {e}"}
 
     # ---------- data ----------
@@ -238,7 +269,8 @@ def _poll_with_timeout(client: PowerwallClient, timeout_s: int = 42) -> dict:
     result = {}
     stop = threading.Event()
     client.stop_event = stop
-    client._reauthed = False  # fresh per poll: at most one re-auth
+    client._reauthed = False  # fresh per poll: re-auth at most once
+    client.last_error = None  # fresh per poll: no stale TLS message
 
     def worker():
         try:
@@ -248,7 +280,9 @@ def _poll_with_timeout(client: PowerwallClient, timeout_s: int = 42) -> dict:
             snap = client.normalise(raw)
             if not snap["reachable"]:
                 result["ok"] = False
-                result["error"] = "gateway endpoints erroring"
+                # A pin mismatch (or other TLS refusal) on any endpoint is
+                # the real cause — surface it instead of the generic message.
+                result["error"] = client.last_error or "gateway endpoints erroring"
             else:
                 result["ok"] = True
                 result["snapshot"] = snap

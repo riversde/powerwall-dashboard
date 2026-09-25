@@ -31,10 +31,29 @@ import time
 import requests
 import urllib3
 import config
+from urllib.parse import urlparse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 log = logging.getLogger("enphase")
+
+
+def _pin_mismatch_msg(e, host: str, pin_key: str):
+    """If e is a TLS fingerprint-pin rejection (the handshake was refused
+    before any bytes left the process), return the diagnostic message to
+    surface as last_error; otherwise return None. A mismatch means the
+    stored pin no longer matches the gateway certificate — the fix is to
+    clear that pin in config.json so the next request re-pins.
+
+    The refusal may surface as a bare SSLError or, after urllib3's
+    retry, wrapped in a MaxRetryError; check the exception chain."""
+    for x in (e,) + (getattr(e, "__cause__", None),):
+        if isinstance(x, requests.exceptions.SSLError) \
+                and "Fingerprints did not match" in str(x):
+            return ("certificate fingerprint mismatch for %s — refusing to send "
+                    "credentials; clear %s in config.json to re-pin"
+                    % (host, pin_key))
+    return None
 
 # Where the persisted session cookie lives (git-ignored runtime file)
 _SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ig_session")
@@ -67,8 +86,10 @@ class EnphaseIQGateway:
         # change can never redirect it. (At startup, app.py copies
         # gateway -> enphase_gateway ONCE if enphase_gateway is empty.)
         self.base = (cfg.get("enphase_gateway") or "").rstrip("/")
+        self._host = urlparse(self.base).hostname or "enphase_gateway"
         self.token = None
         self.auth_failed = False
+        self.last_error = None  # surfaced via poll_state -> /api/status
         self.stop_event = None  # set by the poll guard to abort a slow poll
         # Fix 4: TLS cert-fingerprint pinning (TOFU) instead of verify=False.
         # Item 4: the pin lives in the SHARED self.cfg (the one app.py holds
@@ -115,7 +136,14 @@ class EnphaseIQGateway:
         try:
             r = self.session.get(self.base + "/production.json",
                                 params={"details": 1}, timeout=8)
-        except Exception:
+        except Exception as e:
+            # A pin mismatch is a TLS refusal, not a definitive 401: map it
+            # to None (unknown) so a bad pin can NEVER trigger check_jwt or
+            # burn the token. Record it for the status page.
+            m = _pin_mismatch_msg(e, self._host, "enphase_cert_sha256")
+            if m:
+                self.last_error = m
+                log.warning("enphase probe: %s", m)
             return None  # timeout/connection error — session state unknown
         if r.status_code == 401:
             return False
@@ -178,6 +206,13 @@ class EnphaseIQGateway:
                         r.status_code, _AUTH_LOCKOUT_S)
             return False
         except Exception as e:
+            # A pin mismatch here is a TLS refusal, not a rejected JWT:
+            # record it (status page) and honour the lockout so we don't
+            # re-hammer the gateway on every poll.
+            m = _pin_mismatch_msg(e, self._host, "enphase_cert_sha256")
+            if m:
+                self.last_error = m
+                log.warning("enphase check_jwt: %s", m)
             self._last_auth_fail = time.time()
             self.auth_failed = True
             log.warning("enphase: auth error: %s", e)
@@ -195,6 +230,14 @@ class EnphaseIQGateway:
             try:
                 r = self.session.get(self.base + path, timeout=8)
             except Exception as e:
+                # A pin mismatch is a TLS refusal (nothing was sent): record
+                # it and return the diagnostic. It never reaches the 401
+                # branch, so it can't trigger a re-auth / check_jwt.
+                m = _pin_mismatch_msg(e, self._host, "enphase_cert_sha256")
+                if m:
+                    self.last_error = m
+                    log.warning("enphase get %s: %s", path, m)
+                    return {"error": m}
                 return {"error": f"{type(e).__name__}: {e}"}
             if r.status_code == 401 and self.token and attempt == 1:
                 log.info("401 on %s — re-establishing session", path)
@@ -318,6 +361,7 @@ def _poll_with_timeout(client: EnphaseIQGateway, timeout_s: int = 34) -> dict:
     result = {}
     stop = threading.Event()
     client.stop_event = stop
+    client.last_error = None  # fresh per poll: no stale TLS message
 
     def worker():
         try:
@@ -327,7 +371,9 @@ def _poll_with_timeout(client: EnphaseIQGateway, timeout_s: int = 34) -> dict:
             snap = client.normalise(raw)
             if not snap["reachable"]:
                 result["ok"] = False
-                result["error"] = "gateway endpoints erroring"
+                # A pin mismatch (or other TLS refusal) is the real cause —
+                # surface it instead of the generic message.
+                result["error"] = client.last_error or "gateway endpoints erroring"
             else:
                 result["ok"] = True
                 result["snapshot"] = snap
