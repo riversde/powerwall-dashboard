@@ -176,6 +176,11 @@ def make_pinning_session(pinner: "CertPinner"):
 
     s = requests.Session()
     s.verify = False  # self-signed + IP addressing; pinning replaces the check
+    # Item: trust_env=False so REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE /
+    # HTTPS_PROXY (and friends) can't override verify=False or tunnel the
+    # gateway traffic through an env-configured proxy. The pin is the only
+    # TLS authority for this session; the environment must not add one.
+    s.trust_env = False
     s.mount("https://", _PinningAdapter())
     s.mount("http://", HTTPAdapter())
     return s
