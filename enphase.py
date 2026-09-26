@@ -104,10 +104,13 @@ class EnphaseIQGateway:
             save_pin=lambda fp: (self.cfg.__setitem__("enphase_cert_sha256", fp),
                                 config.save(self.cfg)))
         self.session = certpin.make_pinning_session(self._pin)
-        # Restore a previously established session (survives restarts)
+        # Restore a previously established session (survives restarts).
+        # Stored with the host domain so a later check_jwt Set-Cookie
+        # replaces it (same name+domain+path) instead of creating a
+        # second sessionId cookie the gateway rejects with a 401.
         saved = _load_cookie()
         if saved:
-            self.session.cookies.set("sessionId", saved, path="/")
+            self._set_session_cookie(saved)
 
     def _aborted(self) -> bool:
         return bool(self.stop_event and self.stop_event.is_set())
@@ -125,6 +128,26 @@ class EnphaseIQGateway:
             if c.name == name:
                 return c.value
         return ""
+
+    def _set_session_cookie(self, value: str) -> None:
+        """Keep exactly ONE sessionId cookie in the jar.
+
+        The gateway rejects a request that carries two sessionId cookies
+        (e.g. the restored empty-domain one plus the freshly issued
+        host-domain one) with a 401. So before recording a new session
+        we drop any stale sessionId entries and store a single cookie
+        with the host domain, so a later Set-Cookie (same domain+path+
+        name) replaces it rather than piling on top."""
+        if not value:
+            return
+        jar = self.session.cookies
+        for c in list(jar):
+            if c.name == "sessionId":
+                try:
+                    jar.delete(c.name, domain=c.domain, path=c.path)
+                except Exception:
+                    pass
+        jar.set("sessionId", value, domain=self._host, path="/")
 
     def _session_works(self):
         """Probe the (persisted) session against a DATA endpoint.
@@ -197,7 +220,14 @@ class EnphaseIQGateway:
             if r.status_code == 200 and self._have_session():
                 self.token = token
                 self.auth_failed = False
-                _save_cookie("sessionId", self._get_cookie("sessionId"))
+                # Take the freshly issued value straight from the Set-Cookie
+                # header (not the jar — the jar may also still hold a stale
+                # cookie under a different domain) and force it to be the
+                # ONLY sessionId cookie.
+                sc = r.headers.get("Set-Cookie", "")
+                fresh = sc.split("sessionId=")[1].split(";")[0] if "sessionId=" in sc else self._get_cookie("sessionId")
+                self._set_session_cookie(fresh)
+                _save_cookie("sessionId", fresh)
                 log.info("enphase: session established via JWT")
                 return True
             self._last_auth_fail = time.time()
